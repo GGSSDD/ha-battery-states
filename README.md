@@ -451,6 +451,8 @@ The card, the settings page and the alert texts are in English.
 
 Found a bug or have an idea? [Open an issue](https://github.com/GGSSDD/ha-battery-states/issues).
 
+Questions and discussion: the [Battery States topic](https://community.home-assistant.io/t/1027624) on the Home Assistant Community forum.
+
 If Battery States is useful to you:
 
 <a href="https://buymeacoffee.com/GGSSDD"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy me a coffee" height="45"></a>
