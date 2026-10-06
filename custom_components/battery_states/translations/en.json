@@ -1,0 +1,23 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Battery States",
+        "description": "Choose where the battery alerts and the reminder are sent. Batteries are set afterwards with Configure.",
+        "data": {
+          "notify_service": "Notify service"
+        }
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Battery States is already set up."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "low_batteries": {
+        "name": "Low batteries"
+      }
+    }
+  }
+}

@@ -1,0 +1,3 @@
+# Home Assistant 2026.9.4 test package and the frontend that ships with it
+pytest-homeassistant-custom-component==0.13.367
+home-assistant-frontend==20260826.7

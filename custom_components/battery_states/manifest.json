@@ -1,0 +1,21 @@
+{
+  "domain": "battery_states",
+  "name": "Battery States",
+  "codeowners": [
+    "@GGSSDD"
+  ],
+  "config_flow": true,
+  "dependencies": [
+    "frontend",
+    "http",
+    "panel_custom",
+    "websocket_api"
+  ],
+  "documentation": "https://github.com/GGSSDD/ha-battery-states",
+  "integration_type": "service",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/GGSSDD/ha-battery-states/issues",
+  "requirements": [],
+  "single_config_entry": true,
+  "version": "1.0.12"
+}
