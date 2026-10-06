@@ -1114,17 +1114,14 @@ window.customCards.push({
           color: var(--error-color);
           vertical-align: top;
         }
-        /* Devices not responding (their own section): Home Assistant's colour for
-           unavailable states; "N/A" faded. */
-        ha-card.header.not-responding .header-text,
-        ha-card.row.not-responding .row-icon {
-          color: var(--battery-states-not-responding);
-        }
+        /* Devices not responding (their own section): their icon and "N/A" in
+           Home Assistant's colour for unavailable states. The heading and the
+           summary line look like the others (TOTAL's weight). */
+        ha-card.row.not-responding .row-icon,
         ha-card.row.not-responding .state {
-          color: var(--battery-states-text-faded);
+          color: var(--battery-states-not-responding);
         }
         tr.not-responding td {
-          color: var(--battery-states-not-responding);
           font-weight: bold;
         }
         .label {

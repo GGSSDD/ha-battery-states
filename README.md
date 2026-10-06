@@ -215,10 +215,10 @@ Set these on `:host` (with `!important`, since the card sets them itself):
 | Variable | Default | Used for |
 | --- | --- | --- |
 | `--battery-states-text` | the theme's text colour | Table headings, Group by text |
-| `--battery-states-text-faded` | the text colour at 50 % | Battery type line, table values, filter icon, N/A |
+| `--battery-states-text-faded` | the text colour at 50 % | Battery type line, table values, filter icon |
 | `--battery-states-line` | the theme's divider colour (`--divider-color`), always at 15 % | Divider lines |
 | `--battery-states-summary-border` | the theme's card border colour (`--ha-card-border-color`, else `--divider-color`), always at 50 % | The summary box border |
-| `--battery-states-not-responding` | Home Assistant's colour for unavailable states (`--state-unavailable-color`) | The *Non-responsive devices* heading, icon and summary line |
+| `--battery-states-not-responding` | Home Assistant's colour for unavailable states (`--state-unavailable-color`) | The icon and **N/A** of a non-responsive device |
 
 The card also uses your theme's `--accent-color` (filter on, menu hover), `--error-color` (TOTAL, `*TBR!`), `--chip-background-color` (the chip) and the usual card variables such as `--ha-card-background`.
 
