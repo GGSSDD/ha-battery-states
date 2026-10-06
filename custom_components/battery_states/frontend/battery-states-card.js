@@ -642,8 +642,8 @@ window.customCards.push({
              browsers without relative colours. */
           --battery-states-line: color-mix(in srgb, var(--primary-text-color) 15%, transparent);
           --battery-states-summary-border: color-mix(in srgb, var(--primary-text-color) 50%, transparent);
-          /* Home Assistant's own colour for unavailable / unknown states. */
-          --battery-states-not-responding: var(--state-unavailable-color, var(--disabled-text-color));
+          /* The faded text colour, as the summary's NON-RESPONSIVE line. */
+          --battery-states-not-responding: var(--battery-states-text-faded);
         }
         @supports (color: rgb(from red r g b / 0.5)) {
           :host {
@@ -1115,8 +1115,8 @@ window.customCards.push({
           vertical-align: top;
         }
         /* Devices not responding (their own section): their icon and "N/A" in
-           Home Assistant's colour for unavailable states. The heading and the
-           summary line look like the others (TOTAL's weight). */
+           the same grey as the summary's NON-RESPONSIVE line. The heading and
+           the summary line look like the others (TOTAL's weight). */
         ha-card.row.not-responding .row-icon,
         ha-card.row.not-responding .state {
           color: var(--battery-states-not-responding);
