@@ -22,7 +22,11 @@ Not supported: sensors that only say *battery low: on/off* (a binary sensor with
 
 ### HACS
 
-Until Battery States is in the HACS default store, add it as a custom repository:
+Until Battery States is in the HACS default store, add it as a custom repository. With [My Home Assistant](https://my.home-assistant.io/) set up, this button does it for you:
+
+[![Open your Home Assistant instance and open this repository in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=GGSSDD&repository=ha-battery-states&category=integration)
+
+Or by hand:
 
 1. HACS → menu (⋮) → **Custom repositories**.
 2. Repository: `https://github.com/GGSSDD/ha-battery-states`, type **Integration** → **Add**.
