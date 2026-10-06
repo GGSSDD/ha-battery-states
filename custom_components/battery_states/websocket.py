@@ -24,6 +24,7 @@ from .const import (
     ATTR_ENTITY_ID,
     ATTR_NAME,
     ATTR_RECHARGEABLE,
+    ATTR_SILENCE,
     CONF_ALERT_LOW,
     CONF_ALERT_NOT_SEEN,
     CONF_DEVICES,
@@ -46,6 +47,7 @@ from .const import (
     LOW_THRESHOLD_RANGE,
     NOT_SEEN_HOURS_RANGE,
     SIGNAL_LOG,
+    SILENCE_HOURS_RANGE,
 )
 from .monitor import alert_settings, notify_choices, notify_services
 
@@ -56,6 +58,17 @@ FILTER_KEYS = (
     CONF_INCLUDE_DEVICES,
     CONF_EXCLUDE,
 )
+
+
+def _whole(lo: int, hi: int) -> vol.All:
+    """A whole number from lo to hi (the number fields may send 20.0)."""
+
+    def check(value: Any) -> int:
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value != int(value):
+            raise vol.Invalid("must be a whole number")
+        return int(value)
+
+    return vol.All(check, vol.Range(min=lo, max=hi))
 
 
 @callback
@@ -87,6 +100,14 @@ def _clean(settings: dict[str, Any]) -> dict[str, Any]:
         out[ATTR_BATTERY_TYPE] = battery_type
     if settings.get(ATTR_RECHARGEABLE):
         out[ATTR_RECHARGEABLE] = True
+    hours = settings.get(ATTR_SILENCE)
+    if (
+        isinstance(hours, (int, float))
+        and not isinstance(hours, bool)
+        and SILENCE_HOURS_RANGE[0] <= hours <= SILENCE_HOURS_RANGE[1]
+        and hours == int(hours)
+    ):
+        out[ATTR_SILENCE] = int(hours)
     return out
 
 
@@ -114,6 +135,8 @@ async def _snapshot(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, Any]:
                     "shown_name": dev.name,
                     "shown_type": dev.battery_type,
                     "last_seen_disabled": dev.last_seen_disabled,
+                    "silence_hours": settings.get(ATTR_SILENCE),
+                    "health": entry.runtime_data.diagnostics(dev.entity_id),
                 }
             )
     ent_reg = er.async_get(hass)
@@ -197,17 +220,6 @@ def _log(entry: ConfigEntry) -> list[dict[str, Any]]:
     return entry.runtime_data.log if entry.state is ConfigEntryState.LOADED else []
 
 
-def _whole(lo: int, hi: int) -> vol.All:
-    """A whole number from lo to hi (the number fields may send 20.0)."""
-
-    def check(value: Any) -> int:
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or value != int(value):
-            raise vol.Invalid("must be a whole number")
-        return int(value)
-
-    return vol.All(check, vol.Range(min=lo, max=hi))
-
-
 def _hhmmss(value: Any) -> str:
     return f"{cv.time(value):%H:%M:%S}"
 
@@ -241,11 +253,13 @@ async def ws_get(hass: HomeAssistant, connection, msg: dict[str, Any]) -> None:
         vol.Optional("name", default=""): str,
         vol.Optional("battery_type", default=""): str,
         vol.Optional("rechargeable", default=False): bool,
+        vol.Optional(ATTR_SILENCE, default=None): vol.Any(None, _whole(*SILENCE_HOURS_RANGE)),
     }
 )
 @websocket_api.async_response
 async def ws_update_battery(hass: HomeAssistant, connection, msg: dict[str, Any]) -> None:
-    """Save one battery's friendly name, battery type and rechargeable tick."""
+    """Save one battery's friendly name, battery type, rechargeable tick and
+    its own "not responding after" setting."""
     if (entry := _entry(hass)) is None:
         connection.send_error(msg["id"], "not_found", "Battery States is not set up")
         return

@@ -1,7 +1,7 @@
 """Constants for the Battery States integration."""
 
 DOMAIN = "battery_states"
-VERSION = "1.0.12"
+VERSION = "1.1.0"
 
 NOTIFY_TITLE = "Batteries"
 LOG_SIZE = 50  # recent alerts kept for the settings page
@@ -9,9 +9,9 @@ LOG_SIZE = 50  # recent alerts kept for the settings page
 # Limits and alert settings (settings page). The defaults are the former
 # pyscript / automations' fixed values.
 CONF_LOW_THRESHOLD = "low_threshold"  # % ; at or below = low
-CONF_NOT_SEEN_HOURS = "not_seen_hours"  # silent this long = not seen
+CONF_NOT_SEEN_HOURS = "not_seen_hours"  # minimum silence before "not responding"
 CONF_ALERT_LOW = "alert_low"
-CONF_ALERT_NOT_SEEN = "alert_not_seen"
+CONF_ALERT_NOT_SEEN = "alert_not_seen"  # the "not responding" alert
 CONF_REMINDER = "reminder"
 CONF_REMINDER_DAYS = "reminder_days"  # weekdays, Monday = 0
 CONF_REMINDER_TIME = "reminder_time"  # "HH:MM:SS"
@@ -27,6 +27,7 @@ DEFAULT_QUIET_FROM = "22:00:00"
 DEFAULT_QUIET_TO = "07:00:00"
 LOW_THRESHOLD_RANGE = (1, 99)
 NOT_SEEN_HOURS_RANGE = (1, 168)
+SILENCE_HOURS_RANGE = (1, 720)  # a battery's own "not responding after" (hours)
 
 # Options
 CONF_DEVICES = "devices"  # manual list, in display order
@@ -45,6 +46,7 @@ ATTR_NAME = "name"  # empty = the device's name in HA
 ATTR_BATTERY_TYPE = "battery_type"  # empty = from the battery library
 ATTR_AREA = "area"  # area id; empty = the device's area in HA
 ATTR_RECHARGEABLE = "rechargeable"  # shown as "Rechargeable"
+ATTR_SILENCE = "silence_hours"  # not responding after this silence; empty = automatic
 
 UNKNOWN_TYPE = "Unknown"
 RECHARGEABLE_TYPE = "Rechargeable"

@@ -1,17 +1,21 @@
 """Battery monitoring for Battery States.
 
 Keeps every monitored battery's last real reading (also across restarts),
-flags devices that stopped reporting, sends the alerts and the reminder, and
-provides the data the sensor and the card show.
+learns how often each device reports, flags devices that are not responding
+(see health.py), sends the alerts and the reminder, and provides the data the
+sensors and the card show.
 """
 
 from __future__ import annotations
 
 import asyncio
+import copy
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
+from functools import partial
 import logging
 import math
+import statistics
 from typing import Any
 from uuid import uuid4
 
@@ -27,6 +31,7 @@ from homeassistant.core import (
     CoreState,
     Event,
     EventStateChangedData,
+    EventStateReportedData,
     HomeAssistant,
     State,
     callback,
@@ -41,6 +46,7 @@ from homeassistant.helpers.event import (
     async_call_later,
     async_track_point_in_utc_time,
     async_track_state_change_event,
+    async_track_state_report_event,
     async_track_time_change,
 )
 from homeassistant.helpers.storage import Store
@@ -52,6 +58,7 @@ from .const import (
     ATTR_ENTITY_ID,
     ATTR_NAME,
     ATTR_RECHARGEABLE,
+    ATTR_SILENCE,
     CONF_DEVICES,
     CONF_EXCLUDE,
     CONF_INCLUDE_AREAS,
@@ -84,8 +91,10 @@ from .const import (
     RECHARGEABLE_TYPE,
     SIGNAL_LOG,
     SIGNAL_UPDATE,
+    SILENCE_HOURS_RANGE,
     UNKNOWN_TYPE,
 )
+from . import health
 from .library import BatteryLibrary
 
 _LOGGER = logging.getLogger(__name__)
@@ -97,6 +106,16 @@ RESOLVE_DELAY = 2  # seconds, to coalesce registry updates
 DELIVERY_WAIT = 10  # seconds an unload waits for alerts still being sent
 WAIT_FOR_START = "waiting for Home Assistant to start"
 SEND_MESSAGE = "send_message"  # notify's service for notify entities
+
+# How a device is heard from (see health.py)
+MODE_LAST_SEEN = "last_seen"  # its Last seen sensor (Zigbee2MQTT, Z-Wave JS, ...)
+MODE_UNAVAILABLE = "unavailable"  # its integration marks it unavailable when gone
+MODE_ACTIVITY = "activity"  # any update from it (only with the user's own setting)
+# Where "normal" comes from
+SOURCE_SETTING = "setting"
+SOURCE_OWN = "own"
+SOURCE_MODEL = "model"
+SOURCE_UNAVAILABLE = "unavailable"
 
 
 @dataclass(frozen=True)
@@ -166,7 +185,14 @@ class MonitoredDevice:
     auto_type: str = ""
     added: bool = False  # added one by one (else found by a filter)
     matched: bool = False  # a filter matches it (also when added one by one)
-    last_seen_disabled: bool = False  # its last_seen sensor is disabled: no not-seen check
+    last_seen_disabled: bool = False  # its last_seen sensor is disabled (not used)
+    # "Not responding" detection
+    mode: str = MODE_UNAVAILABLE
+    group: str = ""  # integration + hub: devices sharing a network
+    model: str = ""  # manufacturer|model|model_id ("" = unknown)
+    model_label: str = ""  # e.g. "SNZB-04", for messages
+    silence: float | None = None  # the user's "not responding after" (seconds)
+    activity_entities: tuple[str, ...] = ()  # watched in MODE_ACTIVITY
 
 
 def number_of(state: State | None) -> float | None:
@@ -278,6 +304,13 @@ class BatteryMonitor:
         self._held: list[dict[str, Any]] = []
         self._deliveries: set[asyncio.Task[None]] = set()
         self.library = BatteryLibrary(hass, self._library_updated)
+        # "Not responding" detection: Home Assistant downtime and each network's state.
+        self._downtime: list[tuple[datetime, datetime]] = []
+        self._groups: dict[str, dict[str, Any]] = {}
+        self._by_activity: dict[str, list[MonitoredDevice]] = {}
+        self._report_unsub: CALLBACK_TYPE | None = None
+        self._reeval_unsub: CALLBACK_TYPE | None = None
+        self._seed_task: asyncio.Task[None] | None = None
 
     # ------------------------------------------------------------------ setup
 
@@ -286,9 +319,9 @@ class BatteryMonitor:
         stored = await self._store.async_load()
         if isinstance(stored, dict) and isinstance(stored.get("devices"), dict):
             self._mem = stored["devices"]
-            self._credit_downtime(_parse(stored.get("observed_at")))
         if isinstance(stored, dict):
             self._load_log(stored.get("log"), stored.get("held"))
+            self._load_health(stored)
         await self.library.async_load()
         self.library.async_start_updates()
         self._resolve_devices()
@@ -316,6 +349,8 @@ class BatteryMonitor:
             self._started_unsub = self.hass.bus.async_listen_once(
                 EVENT_HOMEASSISTANT_STARTED, self._ha_started
             )
+        else:
+            self._start_seeding()
 
     @callback
     def _ha_stopping(self, _event: Event) -> None:
@@ -335,6 +370,14 @@ class BatteryMonitor:
         if self._track_unsub:
             self._track_unsub()
             self._track_unsub = None
+        if self._report_unsub:
+            self._report_unsub()
+            self._report_unsub = None
+        if self._reeval_unsub:
+            self._reeval_unsub()
+            self._reeval_unsub = None
+        if self._seed_task is not None and not self._seed_task.done():
+            self._seed_task.cancel()
         for _, unsub in self._timers.values():
             unsub()
         self._timers.clear()
@@ -353,23 +396,115 @@ class BatteryMonitor:
         await self._store.async_save(self._data_to_save())
 
     @callback
-    def _credit_downtime(self, observed_at: datetime | None) -> None:
-        """Home Assistant was not running since observed_at: that time does not
-        count as silence (no device could be heard)."""
-        if observed_at is None:
-            return
+    def _load_health(self, stored: dict[str, Any]) -> None:
+        """Load what "not responding" detection keeps, and bring older data up to date.
+
+        Home Assistant was not running since `observed_at`: that time is no
+        silence (no device could be heard).
+        """
         now = dt_util.utcnow()
-        downtime = max(0.0, (now - observed_at).total_seconds())
+        self._downtime = health.load_intervals(stored.get("downtime"))
+        observed_at = _parse(stored.get("observed_at"))
+        if observed_at is not None and now > observed_at:
+            self._downtime = health.merge(self._downtime + [(observed_at, now)])
+        groups = stored.get("groups")
+        if isinstance(groups, dict):
+            self._groups = {
+                k: {
+                    "outages": health.dump_intervals(health.load_intervals(v.get("outages")), now),
+                    "avail_down": v.get("avail_down") if _parse(v.get("avail_down")) else None,
+                }
+                for k, v in groups.items()
+                if isinstance(k, str) and isinstance(v, dict)
+            }
         for mem in self._mem.values():
-            if unavailable_since := _parse(mem.get("unavailable_since")):
-                mem["unavailable_since"] = (unavailable_since + timedelta(seconds=downtime)).isoformat()
-            if not mem.get("last_seen"):
+            if not isinstance(mem, dict):
                 continue
-            credit = float(mem.get("credit") or 0.0)
+            mem["stats"] = health.clean_stats(mem.get("stats"))
+            # 1.0.x: time a Last seen sensor was down, as a number of seconds after
+            # the last report; now kept as time intervals.
+            credit = mem.pop("credit", None)
+            last_seen = _parse(mem.get("last_seen"))
+            if isinstance(credit, (int, float)) and credit > 0 and last_seen is not None:
+                self._add_interval(mem, "offline", last_seen, last_seen + timedelta(seconds=credit))
             if offline_since := _parse(mem.get("offline_since")):
-                credit += max(0.0, (observed_at - offline_since).total_seconds())
+                if observed_at is not None and observed_at > offline_since:
+                    self._add_interval(mem, "offline", offline_since, observed_at)
                 mem["offline_since"] = None
-            mem["credit"] = credit + downtime
+            # 1.0.x flagged "not seen" (12 h silent or unavailable) and alerted:
+            # if the new rules agree it is the same silence, don't alert again.
+            if mem.get("not_seen") and "not_responding" not in mem:
+                marker = mem.get("unavailable_since") if not last_seen else mem.get("last_seen")
+                if marker:
+                    mem["legacy_not_seen"] = marker
+                mem["not_seen"] = False
+
+    @callback
+    def _start_seeding(self) -> None:
+        if self._seed_task is None and not self._stopped:
+            self._seed_task = self.hass.async_create_background_task(
+                self._async_seed(), f"{DOMAIN} history"
+            )
+
+    async def _async_seed(self) -> None:
+        """Learn each device's rhythm from the recorder's history right away
+        (once), instead of waiting days to learn it from new reports."""
+        if "recorder" not in self.hass.config.components:
+            return
+        from homeassistant.components.recorder import get_instance, history  # noqa: PLC0415
+
+        recorder = get_instance(self.hass)
+        for dev in list(self.devices):
+            if self._stopped:
+                return
+            if dev.mode != MODE_LAST_SEEN:
+                continue
+            mem = self._mem_for(dev.entity_id)
+            if mem["stats"].get("seeded"):
+                continue
+            now = dt_util.utcnow()
+            start = now - health.WINDOW
+            try:
+                states = await recorder.async_add_executor_job(
+                    partial(
+                        history.state_changes_during_period,
+                        self.hass,
+                        start,
+                        now,
+                        entity_id=dev.last_seen_entity,
+                        no_attributes=True,
+                        include_start_time_state=False,
+                    )
+                )
+            except Exception:  # noqa: BLE001 - history is only a head start
+                _LOGGER.debug("No history for %s", dev.last_seen_entity, exc_info=True)
+                continue
+            if self._stopped or not any(d.entity_id == dev.entity_id for d in self.devices):
+                continue
+            times = sorted(
+                {
+                    t
+                    for st in states.get(dev.last_seen_entity or "", [])
+                    if (t := timestamp_of(st)) is not None and start <= t <= now
+                }
+            )
+            live = mem["stats"]
+            stats = health.new_stats()
+            previous = None
+            for t in times:
+                excluded = health.covered(self._downtime, previous, t) if previous else timedelta()
+                health.record_report(stats, t, excluded, False, now)
+                previous = t
+            # Reports heard since the start that the history may not have yet.
+            if (live_last := health.parse(live.get("last"))) and (previous is None or live_last > previous):
+                health.record_report(stats, live_last, timedelta(), False, now)
+            if live.get("base") and not stats.get("base"):
+                stats["base"] = live["base"]
+            health.update_base(stats, now)
+            stats["seeded"] = True
+            mem["stats"] = stats
+        self._store.async_delay_save(self._data_to_save, SAVE_DELAY)
+        self._evaluate_all()
 
     @callback
     def _ha_started(self, _event: Event) -> None:
@@ -378,6 +513,7 @@ class BatteryMonitor:
         self._delayed_resolve(None)
         self._evaluate_all()
         self._flush_held()  # alerts that waited for the start (notify services exist now)
+        self._start_seeding()
 
     # ------------------------------------------------------- device selection
 
@@ -524,6 +660,29 @@ class BatteryMonitor:
                 return state.name
             return entity_id
 
+        def network_of(entry: er.RegistryEntry | None, entity_id: str) -> str:
+            """The device's network: its integration and the hub it connects
+            through (the top of its "connected via" chain)."""
+            if entry is None:
+                return f"?|{entity_id}"
+            device = device_of(entry)
+            root = ""
+            seen_ids: set[str] = set()
+            while device is not None and device.via_device_id and device.via_device_id not in seen_ids:
+                seen_ids.add(device.via_device_id)
+                root = device.via_device_id
+                device = dev_reg.async_get(device.via_device_id)
+            return f"{entry.platform}|{root}"
+
+        def model_of(entry: er.RegistryEntry | None) -> tuple[str, str]:
+            device = device_of(entry)
+            if device is None or not device.manufacturer or not (device.model or device.model_id):
+                return "", ""
+            key = "|".join(
+                (str(x or "").strip().casefold() for x in (device.manufacturer, device.model, device.model_id))
+            )
+            return key, str(device.model_id or device.model)
+
         def library_type(entry: er.RegistryEntry | None) -> str:
             device = device_of(entry)
             if device is None:
@@ -568,20 +727,53 @@ class BatteryMonitor:
             else:
                 battery_type = (settings.get(ATTR_BATTERY_TYPE) or "").strip() or auto_type
             last_seen = last_seen_of(entry)
+            last_seen_entity = (
+                last_seen.entity_id if last_seen and last_seen.disabled_by is None else None
+            )
+            hours = settings.get(ATTR_SILENCE)
+            silence = (
+                float(hours) * 3600
+                if isinstance(hours, (int, float))
+                and not isinstance(hours, bool)
+                and SILENCE_HOURS_RANGE[0] <= hours <= SILENCE_HOURS_RANGE[1]
+                else None
+            )
+            if last_seen_entity:
+                mode = MODE_LAST_SEEN
+            elif silence is not None:
+                mode = MODE_ACTIVITY
+            else:
+                mode = MODE_UNAVAILABLE
+            activity: tuple[str, ...] = ()
+            if mode == MODE_ACTIVITY:
+                if entry is not None and entry.device_id:
+                    activity = tuple(
+                        sorted(
+                            e.entity_id
+                            for e in er.async_entries_for_device(ent_reg, entry.device_id)
+                            if e.disabled_by is None
+                        )
+                    )
+                activity = activity or (entity_id,)
+            model, model_label = model_of(entry)
             return MonitoredDevice(
                 entity_id=entity_id,
                 name=(settings.get(ATTR_NAME) or "").strip() or auto_name,
                 battery_type=battery_type,
                 area=area_name(settings.get(ATTR_AREA)) or auto_area,
-                last_seen_entity=(
-                    last_seen.entity_id if last_seen and last_seen.disabled_by is None else None
-                ),
+                last_seen_entity=last_seen_entity,
                 auto_name=auto_name,
                 auto_area=auto_area,
                 auto_type=auto_type,
                 added=added,
                 matched=matches_filters(entry),
                 last_seen_disabled=bool(last_seen and last_seen.disabled_by is not None),
+                mode=mode,
+                group=network_of(entry, entity_id),
+                model=model,
+                model_label=model_label,
+                silence=silence,
+                activity_entities=activity,
             )
 
         result: list[MonitoredDevice] = []
@@ -617,11 +809,17 @@ class BatteryMonitor:
         self.devices = result
         self._missing = missing
         by_entity: dict[str, list[MonitoredDevice]] = {}
+        by_activity: dict[str, list[MonitoredDevice]] = {}
         for dev in result:
             by_entity.setdefault(dev.entity_id, []).append(dev)
             if dev.last_seen_entity:
                 by_entity.setdefault(dev.last_seen_entity, []).append(dev)
+            for entity_id in dev.activity_entities:
+                by_activity.setdefault(entity_id, []).append(dev)
+                if dev not in by_entity.setdefault(entity_id, []):
+                    by_entity[entity_id].append(dev)
         self._by_entity = by_entity
+        self._by_activity = by_activity
         # Forget timers of devices that are no longer monitored.
         for entity_id in list(self._timers):
             if entity_id not in seen:
@@ -632,9 +830,16 @@ class BatteryMonitor:
         if self._track_unsub:
             self._track_unsub()
             self._track_unsub = None
+        if self._report_unsub:
+            self._report_unsub()
+            self._report_unsub = None
         if self._by_entity or self._missing:
             self._track_unsub = async_track_state_change_event(
                 self.hass, list(self._by_entity) + sorted(self._missing), self._state_changed
+            )
+        if self._by_activity:
+            self._report_unsub = async_track_state_report_event(
+                self.hass, list(self._by_activity), self._state_reported
             )
 
     # ------------------------------------------------------------ evaluation
@@ -645,8 +850,35 @@ class BatteryMonitor:
         if entity_id in self._missing and event.data["new_state"] is not None:
             self._delayed_resolve(None)  # a missing battery is back
             return
+        self._activity(entity_id, event.data["new_state"])
         for dev in self._by_entity.get(entity_id, []):
             self._evaluate(dev)
+
+    @callback
+    def _state_reported(self, event: Event[EventStateReportedData]) -> None:
+        """A value written again unchanged: a report from a watched-by-activity device."""
+        entity_id = event.data["entity_id"]
+        if self._activity(entity_id, event.data["new_state"]):
+            for dev in self._by_entity.get(entity_id, []):
+                self._evaluate(dev)
+
+    @callback
+    def _activity(self, entity_id: str, new_state: State | None) -> bool:
+        """Any update from a device the user watches by activity (no Last seen
+        sensor, own setting) is a report from it."""
+        devs = self._by_activity.get(entity_id)
+        if not devs or self.hass.state is not CoreState.running:
+            return False
+        if (
+            new_state is None
+            or new_state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN)
+            or new_state.attributes.get("restored")
+        ):
+            return False
+        now = dt_util.utcnow()
+        for dev in devs:
+            self._report(dev, self._mem_for(dev.entity_id), now, now)
+        return True
 
     @callback
     def _evaluate_all(self) -> None:
@@ -654,91 +886,92 @@ class BatteryMonitor:
             self._evaluate(dev, publish=False)
         async_dispatcher_send(self.hass, SIGNAL_UPDATE)
 
+    def _mem_for(self, entity_id: str) -> dict[str, Any]:
+        mem = self._mem.setdefault(entity_id, {"state": None, "last_seen": None, "not_seen": False})
+        if not isinstance(mem.get("stats"), dict) or "days" not in mem["stats"]:
+            mem["stats"] = health.clean_stats(mem.get("stats"))
+        return mem
+
     @callback
     def _evaluate(self, dev: MonitoredDevice, publish: bool = True) -> None:
-        """Update one device's held reading and not-seen flag."""
-        mem = self._mem.setdefault(
-            dev.entity_id, {"state": None, "last_seen": None, "not_seen": False}
-        )
-        before = dict(mem)
+        """Update one battery: its reading, its reports and whether its device
+        is not responding."""
+        mem = self._mem_for(dev.entity_id)
+        before = copy.deepcopy(mem)
         now = dt_util.utcnow()
         running = self.hass.state is CoreState.running
-
         state = self.hass.states.get(dev.entity_id)
+        restored = bool(state is not None and state.attributes.get("restored"))
+
+        if dev.mode == MODE_LAST_SEEN:
+            # Zigbee2MQTT, Z-Wave JS and alike: a newer Last seen time is a report.
+            seen_at = timestamp_of(self.hass.states.get(dev.last_seen_entity))
+            if seen_at is None:
+                # The Last seen sensor itself is down (e.g. Zigbee2MQTT stopped):
+                # the device can't be heard, so that time is no silence.
+                if mem.get("last_seen") and not mem.get("offline_since"):
+                    mem["offline_since"] = health.iso(now)
+            else:
+                if offline_since := health.parse(mem.get("offline_since")):
+                    self._add_interval(mem, "offline", offline_since, now)
+                    mem["offline_since"] = None
+                held = health.parse(mem.get("last_seen"))
+                if held is None or seen_at > held:
+                    mem["last_seen"] = health.iso(seen_at)
+                    self._report(dev, mem, seen_at, now)
+        elif dev.mode == MODE_ACTIVITY:
+            # Watched by activity (the user's setting): silence counts from the
+            # first moment it was watched until its first update.
+            if running and not mem.get("activity_since"):
+                mem["activity_since"] = health.iso(now)
+        elif dev.mode == MODE_UNAVAILABLE and running and state is not None and not restored:
+            # The device's integration says whether it is gone (unavailable).
+            if state.state == STATE_UNAVAILABLE:
+                if not mem.get("unavailable_since"):
+                    mem["unavailable_since"] = health.iso(now)
+                    self._group_availability_changed(dev.group, now)
+            else:
+                if mem.get("unavailable_since"):
+                    # Back (also "unknown": its integration no longer says it's gone).
+                    mem["unavailable_since"] = None
+                    self._group_availability_changed(dev.group, now)
+                if mem.get("not_responding") and state.state != STATE_UNKNOWN:
+                    # Only a real value shows the device works again.
+                    self._recovered(dev, mem, now)
+
         value = number_of(state)
         if value is not None:
             old_raw = mem.get("state")
+            # A new low reading is itself proof the device just spoke (its Last
+            # seen update may come a moment later): always alert it.
             if old_raw is not None and float(old_raw) > self.settings.low >= value:
                 self._notify_low(dev, state.state)
             mem["state"] = state.state
 
-        if dev.last_seen_entity:
-            # Zigbee2MQTT and alike: not seen = silent for the not-seen time while it
-            # could have been heard. Time while the last_seen sensor is unavailable
-            # (Zigbee2MQTT down) or Home Assistant is down is credited, so restarts,
-            # reboots and outages never make a device "not seen".
-            seen_at = timestamp_of(self.hass.states.get(dev.last_seen_entity))
-            held = _parse(mem.get("last_seen"))
-            if seen_at is not None:
-                if offline_since := _parse(mem.get("offline_since")):
-                    mem["credit"] = float(mem.get("credit") or 0.0) + max(
-                        0.0, (now - offline_since).total_seconds()
-                    )
-                    mem["offline_since"] = None
-                if held is None or seen_at > held:
-                    # A new message from the device.
-                    mem["last_seen"] = seen_at.isoformat()
-                    mem["credit"] = 0.0
-                    held = seen_at
-            elif held is not None and not mem.get("offline_since"):
-                mem["offline_since"] = now.isoformat()
-            if held is None or mem.get("offline_since"):
-                # Can't judge while it can't be heard: keep the current flag.
-                not_seen = bool(mem.get("not_seen"))
-                due = None
-            else:
-                due = held + timedelta(seconds=float(mem.get("credit") or 0.0)) + self.settings.not_seen
-                not_seen = now >= due
-            self._schedule(dev, None if (due is None or not_seen) else due)
-        elif value is not None:
-            not_seen = False
-            mem["unavailable_since"] = None
-            self._schedule(dev, None)
-        elif (
-            running
-            and state is not None
-            and state.state == STATE_UNAVAILABLE
-            and not state.attributes.get("restored")
-        ):
-            # No last_seen sensor (e.g. SwitchBot, ZHA): not seen = unavailable for
-            # the not-seen time, so a short outage (a reload, a Wi-Fi or cloud blip,
-            # a hub restart) never counts. Time Home Assistant is down is credited.
-            since = _parse(mem.get("unavailable_since"))
-            if since is None:
-                since = now
-                mem["unavailable_since"] = now.isoformat()
-            if mem.get("not_seen"):
-                # Already not seen (also when flagged by an older version): it
-                # stays so until a real reading comes.
-                not_seen = True
-            else:
-                not_seen = now >= since + self.settings.not_seen
-            self._schedule(dev, None if not_seen else since + self.settings.not_seen)
-        else:
-            not_seen = bool(mem.get("not_seen"))
-            if running and state is not None and state.state != STATE_UNAVAILABLE:
-                # Back, without a reading yet (unknown): the outage is over.
-                mem["unavailable_since"] = None
+        verdict = self._verdict(dev, mem, now)
+        if running and verdict["judged"] and verdict["network"] != "down":
+            if verdict["silence"] is not None and verdict["silence"] >= verdict["threshold"]:
+                if not mem.get("not_responding"):
+                    self._start_not_responding(dev, mem, verdict, now)
                 self._schedule(dev, None)
-
-        if not_seen and not mem.get("not_seen"):
-            self._notify_not_seen(dev)
-        mem["not_seen"] = not_seen
+            else:
+                if mem.get("not_responding") and verdict["silence"] is not None:
+                    # Judged again (e.g. its own setting changed): responding after all.
+                    self._recovered(dev, mem, now, note="no longer beyond its limit")
+                due = None
+                if verdict["silence"] is not None:
+                    due = now + (verdict["threshold"] - verdict["silence"])
+                self._schedule(dev, due)
+        else:
+            # Can't judge now (not started, unknown rhythm, network down): keep
+            # the current state; a report or a recovering network re-checks it.
+            self._schedule(dev, None)
+        mem["not_seen"] = bool(mem.get("not_responding"))  # older readers of the store
 
         if mem != before:
             if (
                 mem.get("state") != before.get("state")
-                or mem["not_seen"] != before.get("not_seen")
+                or mem.get("not_responding") != before.get("not_responding")
                 or mem.get("unavailable_since") != before.get("unavailable_since")
             ):
                 self._store.async_delay_save(self._data_to_save, SAVE_DELAY)
@@ -749,6 +982,312 @@ class BatteryMonitor:
             if publish:
                 async_dispatcher_send(self.hass, SIGNAL_UPDATE)
 
+    # ----------------------------------------------------------- reports
+
+    @callback
+    def _report(self, dev: MonitoredDevice, mem: dict[str, Any], at: datetime, now: datetime) -> None:
+        """The device was heard from at `at`."""
+        stats = mem["stats"]
+        last = health.parse(stats["last"])
+        self._ping(dev, at)  # before this report counts: was its network down?
+        excluded = (
+            health.covered(self._excluded(dev, mem, now), last, at)
+            if last is not None and at > last
+            else timedelta()
+        )
+        incident = bool(mem.get("not_responding"))
+        health.record_report(stats, at, excluded, incident, now)
+        health.update_base(stats, now)
+        if incident:
+            self._recovered(dev, mem, now)
+        mem.pop("legacy_not_seen", None)
+
+    def _last_report(self, mem: dict[str, Any]) -> datetime | None:
+        stats = mem.get("stats") or {}
+        return health.parse(stats.get("last")) or health.parse(mem.get("last_seen"))
+
+    def _add_interval(self, mem: dict[str, Any], key: str, start: datetime, end: datetime) -> None:
+        intervals = health.load_intervals(mem.get(key)) + [(start, end)]
+        mem[key] = health.dump_intervals(intervals, end)
+
+    def _excluded(self, dev: MonitoredDevice, mem: dict[str, Any], now: datetime) -> list[tuple[datetime, datetime]]:
+        """Time that is no silence: Home Assistant down, the device's Last seen
+        sensor down, or its whole network down."""
+        intervals = list(self._downtime) + health.load_intervals(mem.get("offline"))
+        if offline_since := health.parse(mem.get("offline_since")):
+            intervals.append((offline_since, now))
+        intervals += self._outages(dev.group, now)
+        return intervals
+
+    # ------------------------------------------------------------ verdict
+
+    def _normal(self, dev: MonitoredDevice, mem: dict[str, Any]) -> tuple[timedelta | None, str | None, int]:
+        """What's normal for the device: (longest normal gap, source, twins)."""
+        if dev.silence is not None:
+            return None, SOURCE_SETTING, 0
+        if dev.mode == MODE_UNAVAILABLE:
+            return None, SOURCE_UNAVAILABLE, 0
+        base = mem["stats"].get("base")
+        if base:
+            return timedelta(seconds=base), SOURCE_OWN, 0
+        twins = [
+            other["stats"]["base"]
+            for d in self.devices
+            if dev.model
+            and d.model == dev.model
+            and d.entity_id != dev.entity_id
+            and d.mode != MODE_UNAVAILABLE
+            and (other := self._mem.get(d.entity_id))
+            and isinstance(other.get("stats"), dict)
+            and other["stats"].get("base")
+        ]
+        if len(twins) >= health.TWINS_MIN:
+            return timedelta(seconds=statistics.median(twins)), SOURCE_MODEL, len(twins)
+        return None, None, len(twins)
+
+    def _verdict(self, dev: MonitoredDevice, mem: dict[str, Any], now: datetime) -> dict[str, Any]:
+        """Whether the device can be judged now, and how long it has been silent."""
+        normal, source, twins = self._normal(dev, mem)
+        minimum = self.settings.not_seen
+        setting = timedelta(seconds=dev.silence) if dev.silence is not None else None
+        if source == SOURCE_UNAVAILABLE:
+            limit: timedelta | None = minimum
+        else:
+            limit = health.threshold(normal, source, minimum, setting)
+        verdict: dict[str, Any] = {
+            "judged": False,
+            "reason": None,
+            "normal": normal,
+            "source": source,
+            "twins": twins,
+            "threshold": limit,
+            "network": self._network(dev, now),
+            "silence": None,
+            "since": None,
+        }
+        if limit is None:
+            # No normal known: still learning, or its own reports are irregular
+            # (and there aren't enough steady devices of its model to compare).
+            stats = mem["stats"]
+            first = health.parse(stats.get("first"))
+            reports = sum(v[0] for v in stats["days"].values())
+            enough = (
+                first is not None
+                and now - first >= health.LEARN_MIN_SPAN
+                and reports >= health.LEARN_MIN_REPORTS
+            )
+            verdict["reason"] = "irregular" if enough and not health.steady(stats, now) else "learning"
+            return verdict
+        if verdict["network"] == "alone" and setting is None:
+            verdict["reason"] = "alone"
+            return verdict
+        verdict["judged"] = True
+        if source == SOURCE_UNAVAILABLE:
+            since = health.parse(mem.get("unavailable_since"))
+            if since is None:
+                return verdict  # available: nothing to judge
+            excluded = list(self._downtime) + self._outages(dev.group, now)
+        else:
+            since = self._last_report(mem)
+            if since is None and dev.mode == MODE_ACTIVITY:
+                since = health.parse(mem.get("activity_since"))
+            if since is None:
+                verdict["judged"] = False
+                verdict["reason"] = "no_report"
+                return verdict
+            excluded = self._excluded(dev, mem, now)
+        verdict["since"] = since
+        verdict["silence"] = max(timedelta(), now - since - health.covered(excluded, since, now))
+        return verdict
+
+    # ------------------------------------------------------------ networks
+
+    def _members(self, group: str, exclude: str | None = None) -> list[MonitoredDevice]:
+        return [d for d in self.devices if d.group == group and d.entity_id != exclude]
+
+    def _cadence(self, dev: MonitoredDevice) -> timedelta:
+        """How often a device is heard from when all is well."""
+        mem = self._mem.get(dev.entity_id) or {}
+        base = (mem.get("stats") or {}).get("base")
+        return max(health.MIN_CADENCE, timedelta(seconds=base) if base else health.UNKNOWN_CADENCE)
+
+    def _available(self, dev: MonitoredDevice) -> bool:
+        state = self.hass.states.get(dev.entity_id)
+        return (
+            state is not None
+            and state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN)
+            and not state.attributes.get("restored")
+        )
+
+    def _healthy(self, dev: MonitoredDevice, at: datetime) -> bool:
+        """Evidence that the network works: on schedule, or available."""
+        mem = self._mem.get(dev.entity_id) or {}
+        if mem.get("not_responding"):
+            return False
+        if dev.mode == MODE_UNAVAILABLE:
+            return self._available(dev)
+        last = self._last_report(mem)
+        return last is not None and timedelta() <= at - last <= self._cadence(dev)
+
+    def _network(self, dev: MonitoredDevice, now: datetime) -> str:
+        members = self._members(dev.group, exclude=dev.entity_id)
+        if not members:
+            return "alone"
+        return "ok" if any(self._healthy(m, now) for m in members) else "down"
+
+    def _group_state(self, group: str) -> dict[str, Any]:
+        return self._groups.setdefault(group, {"outages": [], "avail_down": None})
+
+    def _last_alive(self, group: str) -> datetime | None:
+        """When the network was last known to work."""
+        times = [
+            t
+            for m in self._members(group)
+            if m.mode != MODE_UNAVAILABLE and (t := self._last_report(self._mem.get(m.entity_id) or {}))
+        ]
+        if avail_down := health.parse(self._group_state(group).get("avail_down")):
+            times.append(avail_down)
+        return max(times) if times else None
+
+    def _outages(self, group: str, now: datetime) -> list[tuple[datetime, datetime]]:
+        """Times the device's whole network was down (also one going on now)."""
+        g = self._group_state(group)
+        intervals = health.load_intervals(g.get("outages"))
+        members = self._members(group)
+        if len(members) > 1 and not any(self._healthy(m, now) for m in members):
+            if (start := self._last_alive(group)) and start < now:
+                intervals.append((start, now))
+        return intervals
+
+    @callback
+    def _ping(self, dev: MonitoredDevice, at: datetime) -> None:
+        """A device was heard from: if its network was down, that outage ended."""
+        members = self._members(dev.group)
+        if len(members) < 2:
+            return
+        if any(self._healthy(m, at) for m in members):
+            return
+        start = self._last_alive(dev.group)
+        if start is not None and at > start:
+            self._record_outage(dev.group, start, at)
+
+    @callback
+    def _group_availability_changed(self, group: str, now: datetime) -> None:
+        """A device judged by availability went down or came back."""
+        g = self._group_state(group)
+        members = self._members(group)
+        up = [m for m in members if m.mode == MODE_UNAVAILABLE and self._available(m)]
+        if not up:
+            if not g.get("avail_down"):
+                g["avail_down"] = health.iso(now)
+            return
+        down = health.parse(g.get("avail_down"))
+        g["avail_down"] = None
+        if down is None or len(members) < 2:
+            return
+        reporters = [m for m in members if m.mode != MODE_UNAVAILABLE]
+        if any(self._healthy(m, now) for m in reporters):
+            return
+        start = max([down] + [t for m in reporters if (t := self._last_report(self._mem.get(m.entity_id) or {}))])
+        if now > start:
+            self._record_outage(group, start, now)
+
+    @callback
+    def _record_outage(self, group: str, start: datetime, end: datetime) -> None:
+        g = self._group_state(group)
+        g["outages"] = health.dump_intervals(health.load_intervals(g.get("outages")) + [(start, end)], end)
+        self._store.async_delay_save(self._data_to_save, SAVE_DELAY)
+        # Devices that waited for their network: judge them again.
+        if self._reeval_unsub is None:
+            self._reeval_unsub = async_call_later(self.hass, 0, self._reevaluate)
+
+    @callback
+    def _reevaluate(self, _now: datetime) -> None:
+        self._reeval_unsub = None
+        if not self._stopped:
+            self._evaluate_all()
+
+    # ------------------------------------------------------ not responding
+
+    @callback
+    def _start_not_responding(self, dev: MonitoredDevice, mem: dict[str, Any], verdict: dict[str, Any], now: datetime) -> None:
+        since = health.iso(verdict["since"])
+        mem["not_responding"] = {
+            "since": since,
+            "flagged": health.iso(now),
+            "source": verdict["source"],
+            "normal": verdict["normal"].total_seconds() if verdict["normal"] else None,
+            "threshold": verdict["threshold"].total_seconds(),
+            "twins": verdict["twins"],
+        }
+        legacy = mem.pop("legacy_not_seen", None)
+        if legacy is not None and health.parse(legacy) == verdict["since"]:
+            return  # already alerted for this silence by an older version
+        if not self.settings.alert_not_seen:
+            return
+        if not health.realert(health.parse(mem.get("recovered_at")), now):
+            self._note(
+                "not_responding",
+                self._not_responding_text(dev, mem),
+                dev,
+                "not sent: it dropped out again less than a day after it came back",
+                status="skipped",
+            )
+            return
+        self._alert("not_responding", self._not_responding_text(dev, mem), dev)
+
+    @callback
+    def _recovered(self, dev: MonitoredDevice, mem: dict[str, Any], now: datetime, note: str = "") -> None:
+        episode = mem.pop("not_responding", None)
+        mem.pop("legacy_not_seen", None)
+        if episode is None:
+            return
+        mem["recovered_at"] = health.iso(now)
+        since = health.parse(episode.get("since"))
+        self._note(
+            "recovered",
+            f"The device {dev.name.upper()}{self._where(dev)} is responding again.",
+            dev,
+            note or (f"not responding since {self._local(since)}" if since else ""),
+        )
+
+    def _local(self, value: datetime) -> str:
+        t = dt_util.as_local(value)
+        return f"{t.day} {t:%b} {t:%H:%M}"
+
+    # --------------------------------------------------------- diagnostics
+
+    def diagnostics(self, entity_id: str) -> dict[str, Any]:
+        """How a battery is judged, for the settings page."""
+        dev = next((d for d in self.devices if d.entity_id == entity_id), None)
+        if dev is None:
+            return {}
+        now = dt_util.utcnow()
+        mem = self._mem_for(entity_id)
+        verdict = self._verdict(dev, mem, now)
+        stats = mem["stats"]
+        first = health.parse(stats.get("first"))
+        episode = mem.get("not_responding")
+        last = self._last_report(mem)
+        return {
+            "mode": dev.mode,
+            "status": self._status(mem),
+            "judged": verdict["judged"],
+            "reason": verdict["reason"],
+            "normal": verdict["normal"].total_seconds() if verdict["normal"] else None,
+            "source": verdict["source"],
+            "twins": verdict["twins"],
+            "model": dev.model_label,
+            "threshold": verdict["threshold"].total_seconds() if verdict["threshold"] else None,
+            "network": verdict["network"],
+            "last_report": health.iso(last) if last else None,
+            "silence": verdict["silence"].total_seconds() if verdict["silence"] is not None else None,
+            "since": episode.get("since") if episode else None,
+            "reports": sum(v[0] for v in stats["days"].values()),
+            "observed_days": round((now - first).total_seconds() / 86400, 1) if first else 0,
+            "silence_setting": dev.silence / 3600 if dev.silence is not None else None,
+        }
+
     @callback
     def _save_last_seen(self, _now: datetime) -> None:
         self._last_seen_save_unsub = None
@@ -756,7 +1295,7 @@ class BatteryMonitor:
 
     @callback
     def _schedule(self, dev: MonitoredDevice, when: datetime | None) -> None:
-        """Re-check a device exactly when it passes the not-seen time."""
+        """Re-check a device exactly when its silence reaches its limit."""
         current = self._timers.get(dev.entity_id)
         if current and current[0] == when:
             return
@@ -784,47 +1323,85 @@ class BatteryMonitor:
             "devices": {k: v for k, v in self._mem.items() if k in keep},
             "log": self.log,
             "held": self._held,
+            "downtime": health.dump_intervals(self._downtime, dt_util.utcnow()),
+            "groups": {
+                key: {
+                    "outages": health.dump_intervals(health.load_intervals(g.get("outages")), dt_util.utcnow()),
+                    "avail_down": g.get("avail_down"),
+                }
+                for key, g in self._groups.items()
+                if key in {d.group for d in self.devices}
+            },
         }
 
     # ------------------------------------------------------------ the output
 
+    def _status(self, mem: dict[str, Any]) -> str:
+        """ok, low (a known low level) or not_responding."""
+        if mem.get("not_responding"):
+            return "not_responding"
+        raw = mem.get("state")
+        if raw is not None and float(raw) <= self.settings.low:
+            return "low"
+        return "ok"
+
     def snapshot(self) -> tuple[int, dict[str, Any]]:
-        """Return (low count, attributes) for the sensor and the card."""
+        """Return (low count, attributes) for the sensors and the card.
+
+        Low counts only working devices whose level is known to be low; a
+        device that is not responding is counted on its own.
+        """
         devices: list[dict[str, Any]] = []
         counts: dict[str, int] = {}
         types: set[str] = set()
         total = 0
+        silent = 0
         for dev in self.devices:
-            mem = self._mem.get(dev.entity_id, {})
+            mem = self._mem.get(dev.entity_id) or {}
             raw = mem.get("state")
-            not_seen = bool(mem.get("not_seen"))
-            reading = raw is not None and not not_seen
+            status = self._status(mem)
             types.add(dev.battery_type)
-            # Count exactly as before: the reading itself, 0 when there is none.
-            if (float(raw) if reading else 0.0) <= self.settings.low:
+            if status == "low":
                 counts[dev.battery_type] = counts.get(dev.battery_type, 0) + 1
                 total += 1
+            elif status == "not_responding":
+                silent += 1
+            episode = mem.get("not_responding") or {}
+            last = self._last_report(mem)
             devices.append(
                 {
                     "entity_id": dev.entity_id,
                     "name": dev.name,
                     "battery_type": dev.battery_type,
                     "area": dev.area,
-                    "state": raw if reading else "0",
-                    "value": one_decimal(raw) if reading else 0.0,
-                    "reading": reading,
-                    "not_seen": not_seen,
+                    "state": raw if raw is not None else "0",
+                    "value": one_decimal(raw) if raw is not None else 0.0,
+                    "reading": raw is not None,
+                    "status": status,
+                    "not_seen": status == "not_responding",  # older templates
+                    "last_report": health.iso(last) if last else None,
+                    "not_responding_since": episode.get("since"),
                 }
             )
         return total, {
             "battery_low_count": [{t: counts.get(t, 0)} for t in sorted(types)],
+            "not_responding_count": silent,
             "devices": devices,
             "low_threshold": self.settings.low,
         }
 
+    def counts(self) -> tuple[int, int]:
+        """(low batteries, devices not responding)."""
+        _, attrs = self.snapshot()
+        return sum(next(iter(c.values())) for c in attrs["battery_low_count"]), attrs["not_responding_count"]
+
     def low_count(self) -> int:
-        """Number of batteries at or below the threshold (not seen = 0 %)."""
-        return self.snapshot()[0]
+        """Number of working batteries at or below the low limit."""
+        return self.counts()[0]
+
+    def not_responding(self) -> list[str]:
+        """The batteries whose device is not responding."""
+        return [d.entity_id for d in self.devices if (self._mem.get(d.entity_id) or {}).get("not_responding")]
 
     # ------------------------------------------------------------- alerts
 
@@ -975,23 +1552,25 @@ class BatteryMonitor:
         if kind == "reminder":
             if not s.reminder:
                 return "the reminder is off"
-            count = self.low_count()
-            if count == 0:
-                return "nothing low or not seen any more"
-            entry["message"] = self._reminder_text(count)
-            entry["detail"] = str(count)
+            low, broken = self.counts()
+            if low + broken == 0:
+                return "nothing low or not responding any more"
+            entry["message"] = self._reminder_text(low, broken)
+            entry["detail"] = self._reminder_detail(low, broken)
             return None
-        if kind not in ("low", "not_seen"):
+        if kind not in ("low", "not_seen", "not_responding"):
             return None
         if kind == "low" and not s.alert_low:
             return "the low battery alert is off"
-        if kind == "not_seen" and not s.alert_not_seen:
-            return "the stopped reporting alert is off"
+        if kind in ("not_seen", "not_responding") and not s.alert_not_seen:
+            return "the not responding alert is off"
         if entry.get("entity_id") not in {d.entity_id for d in self.devices}:
             return "the battery is no longer on the list"
         mem = self._mem.get(entry["entity_id"], {})
-        if kind == "not_seen":
-            return None if mem.get("not_seen") else "it reported again"
+        if kind in ("not_seen", "not_responding"):
+            return None if mem.get("not_responding") else "it is responding again"
+        if mem.get("not_responding"):
+            return "its device is not responding"
         raw = mem.get("state")
         if raw is None or float(raw) > s.low:
             return f"the battery is above {s.low} % again"
@@ -1071,30 +1650,85 @@ class BatteryMonitor:
             f"{alert_percent(raw)} %",
         )
 
-    @callback
-    def _notify_not_seen(self, dev: MonitoredDevice) -> None:
-        if not self.settings.alert_not_seen:
-            return
-        self._alert(
-            "not_seen",
-            f"The device {dev.name.upper()}{self._where(dev)}, with "
-            f"battery type: {dev.battery_type.upper()}, has stopped reporting. Its "
-            f"battery may be dead. Consider {recharge_word(dev.battery_type)} it soon!",
-            dev,
+    def _not_responding_text(self, dev: MonitoredDevice, mem: dict[str, Any]) -> str:
+        episode = mem["not_responding"]
+        since = health.parse(episode["since"])
+        when = self._local(since) if since else "?"
+        normal = timedelta(seconds=episode["normal"]) if episode.get("normal") else None
+        source = episode.get("source")
+        if source == SOURCE_UNAVAILABLE:
+            evidence = f"unavailable since {when}, while other devices on its network work"
+        else:
+            evidence = f"no report since {when}"
+            if source == SOURCE_MODEL and normal:
+                evidence += (
+                    f", while other {dev.model_label} devices report at least every "
+                    f"{health.duration_text(normal)}"
+                )
+            elif source == SOURCE_OWN and normal:
+                evidence += f", while it usually reports at least every {health.duration_text(normal)}"
+            elif source == SOURCE_SETTING:
+                evidence += (
+                    f", longer than the {health.duration_text(timedelta(seconds=episode['threshold']))} you set"
+                )
+        raw = mem.get("state")
+        level = f"{alert_percent(raw)}%" if raw is not None else "unknown"
+        return (
+            f"The device {dev.name.upper()}{self._where(dev)}, with battery type: "
+            f"{dev.battery_type.upper()}, is not responding: {evidence}. Last battery level: "
+            f"{level}. Check its battery, the device and its connection."
         )
 
-    def _reminder_text(self, count: int) -> str:
-        one = count == 1
-        return (
-            f"You still have {count} {'device' if one else 'devices'} with the battery level below "
-            f"{self.settings.low}%. Consider replacing or recharging {'it' if one else 'them'} soon!"
-        )
+    @callback
+    def _note(
+        self, kind: str, message: str, dev: MonitoredDevice | None, note: str, status: str = "info"
+    ) -> None:
+        """Keep something in the recent alerts without sending it."""
+        entry: dict[str, Any] = {
+            "id": uuid4().hex,
+            "time": dt_util.utcnow().isoformat(),
+            "kind": kind,
+            "entity_id": dev.entity_id if dev else None,
+            "name": dev.name if dev else "",
+            "area": dev.area if dev else "",
+            "detail": "",
+            "message": message,
+            "status": status,
+            "note": note,
+            "targets": [],
+        }
+        self.log.insert(0, entry)
+        del self.log[LOG_SIZE:]
+        self._log_changed()
+
+    def _reminder_text(self, low: int, broken: int = 0) -> str:
+        parts = []
+        if low:
+            parts.append(
+                f"{low} {'device' if low == 1 else 'devices'} with the battery level below {self.settings.low}%"
+            )
+        if broken:
+            parts.append(f"{broken} {'device' if broken == 1 else 'devices'} not responding")
+        if low and not broken:
+            advice = f"Consider replacing or recharging {'it' if low == 1 else 'them'} soon!"
+        elif broken and not low:
+            advice = f"Check {'it' if broken == 1 else 'them'} soon!"
+        else:
+            advice = "Check them soon!"
+        return f"You still have {' and '.join(parts)}. {advice}"
+
+    @staticmethod
+    def _reminder_detail(low: int, broken: int) -> str:
+        parts = [f"{low} low"] if low else []
+        if broken:
+            parts.append(f"{broken} not responding")
+        return ", ".join(parts)
 
     @callback
     def _async_reminder(self, now: datetime) -> None:
         s = self.settings
         if not s.reminder or dt_util.as_local(now).weekday() not in s.reminder_days:
             return
-        count = self.low_count()
-        if count > 0:
-            self._alert("reminder", self._reminder_text(count), detail=str(count))
+        low, broken = self.counts()
+        if low + broken > 0:
+            self._alert("reminder", self._reminder_text(low, broken), detail=self._reminder_detail(low, broken))

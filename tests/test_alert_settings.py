@@ -8,7 +8,9 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import async_mock_service
 
-from .helpers import LAST_SEEN, OLD, advance, low_alerts, make_zigbee_device, setup_bs, stopped_alerts
+from .helpers import (
+    LAST_SEEN, OLD, advance, advance_beating, low_alerts, make_twin, make_zigbee_device, setup_bs, stopped_alerts, teach,
+)
 
 def at(day, hour, minute=0, second=0):
     """Local time in HA's time zone (read when called: the test HA sets it)."""
@@ -40,7 +42,7 @@ async def test_low_limit_setting(hass: HomeAssistant, freezer) -> None:
     make_zigbee_device(hass)
     calls = async_mock_service(hass, "notify", "test")
     fresh(hass, "35")
-    entry = await setup_bs(hass, low_threshold=30)
+    entry = await setup_bs(hass, silence=None, low_threshold=30)
     hass.states.async_set(OLD, "28")
     await hass.async_block_till_done(wait_background_tasks=True)
     assert low_alerts(calls) and "dropped to 28%" in low_alerts(calls)[0]
@@ -51,15 +53,20 @@ async def test_low_limit_setting(hass: HomeAssistant, freezer) -> None:
     assert "below 30%" in calls[-1].data["message"]
 
 
-async def test_not_seen_hours_setting_and_live_change(hass: HomeAssistant, freezer) -> None:
+async def test_minimum_silence_setting_and_live_change(hass: HomeAssistant, freezer) -> None:
+    """1.1.0: "Not seen after" is the minimum silence before "not responding"."""
     make_zigbee_device(hass)
+    twins = [make_twin(hass, n) for n in (1, 2)]
     calls = async_mock_service(hass, "notify", "test")
     fresh(hass, hours_ago=8)
-    entry = await setup_bs(hass)
-    assert entry.runtime_data._mem[OLD]["not_seen"] is False
+    entry = await setup_bs(hass, silence=None)
+    mon = entry.runtime_data
+    teach(mon, [b for b, _ in twins], 3600)  # its model reports at least hourly
+    assert mon._mem[OLD].get("not_responding") is None  # 8 h < 12 h minimum
     hass.config_entries.async_update_entry(entry, options={**entry.options, "not_seen_hours": 6})
     await hass.async_block_till_done(wait_background_tasks=True)
-    assert entry.runtime_data._mem[OLD]["not_seen"] is True and len(stopped_alerts(calls)) == 1
+    assert mon._mem[OLD]["not_responding"]["source"] == "model" and len(stopped_alerts(calls)) == 1
+    assert "while other SNZB-04 devices report at least every 1 hour" in stopped_alerts(calls)[0]
 
 
 async def test_bad_saved_values_fall_back_to_defaults(hass: HomeAssistant, freezer) -> None:
@@ -84,7 +91,8 @@ async def test_alert_switches(hass: HomeAssistant, freezer) -> None:
     await advance(hass, freezer, 3600)  # past Tuesday 20:00
     mon = entry.runtime_data
     assert calls == [] and mon.log == []
-    assert mon._mem[OLD]["not_seen"] is True and mon.snapshot()[0] == 1  # card and count unchanged
+    count, attrs = mon.snapshot()  # the card and the counts still show it
+    assert mon._mem[OLD]["not_seen"] is True and attrs["not_responding_count"] == 1 and count == 0
 
 
 @pytest.mark.parametrize(("days", "start", "fires"), [([0], (5, 8, 29, 59), True), ([0], (6, 8, 29, 59), False), ([], (5, 8, 29, 59), False)])
@@ -134,7 +142,7 @@ async def test_quiet_hours_skip_when_no_longer_true(hass: HomeAssistant, freezer
     await advance(hass, freezer, 1)
     assert calls == []
     notes = {e["kind"]: (e["status"], e["note"]) for e in mon.log}
-    assert notes["not_seen"] == ("skipped", "it reported again")
+    assert notes["not_responding"] == ("skipped", "it is responding again")
     assert notes["low"] == ("skipped", "the battery is above 20 % again")
 
 
@@ -320,12 +328,13 @@ async def test_alert_while_starting_waits_for_start(hass: HomeAssistant, freezer
     hass.set_state(CoreState.starting)
     fresh(hass, hours_ago=13)
     entry = await setup_bs(hass)
-    e = entry.runtime_data.log[0]
-    assert calls == [] and (e["status"], e["note"]) == ("held", "waiting for Home Assistant to start")
+    # 1.1.0: nothing is judged while Home Assistant starts (networks aren't up yet).
+    assert calls == [] and entry.runtime_data.log == []
     hass.set_state(CoreState.running)
     hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
     await hass.async_block_till_done(wait_background_tasks=True)
-    assert len(stopped_alerts(calls)) == 1 and (e["status"], e["note"]) == ("sent", "sent once Home Assistant had started")
+    e = entry.runtime_data.log[0]
+    assert len(stopped_alerts(calls)) == 1 and (e["kind"], e["status"]) == ("not_responding", "sent")
 
 
 async def test_alert_while_starting_in_quiet_hours_waits_for_quiet_end(hass: HomeAssistant, freezer) -> None:

@@ -53,7 +53,7 @@ async def test_flagged_device_through_delete_and_recreate(hass: HomeAssistant, f
     hass.states.async_set(LAST_SEEN, seen)
     await hass.async_block_till_done(wait_background_tasks=True)
     await advance(hass, freezer, 3)
-    stopped = [c for c in calls if "stopped reporting" in c.data["message"]]
+    stopped = [c for c in calls if "is not responding" in c.data["message"]]
     print(f"gap {gap}s: on list during gap={on_list_during_gap} after={[(d.entity_id, d.name) for d in mon.devices]} not-seen alerts={len(stopped)} flag={mon._mem[OLD]['not_seen']}")
     assert [(d.entity_id, d.name) for d in mon.devices] == [(OLD, "Window Contact")]
     assert len(stopped) == 1

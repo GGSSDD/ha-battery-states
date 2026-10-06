@@ -17,6 +17,9 @@
     "sensor": {
       "low_batteries": {
         "name": "Low batteries"
+      },
+      "not_responding": {
+        "name": "Not responding"
       }
     }
   }

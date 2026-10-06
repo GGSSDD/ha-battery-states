@@ -61,15 +61,43 @@ window.customCards.push({
     return x < y ? -1 : x > y ? 1 : 0;
   };
 
+  // ok, low or not_responding, as the integration decided (1.1.0). A card
+  // still cached from before, or an older integration, sends no status.
+  const statusOf = (d, low) =>
+    d.status || (d.not_seen ? "not_responding" : (parseFloat(d.state) || 0) <= low ? "low" : "ok");
+
+  // "4 Oct, 14:43", as the user's profile sets the language, clock and time zone.
+  const formatWhen = (hass, iso) => {
+    if (!iso) return "";
+    const loc = hass.locale || {};
+    const opts = { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" };
+    if (loc.time_zone === "server" && hass.config?.time_zone) opts.timeZone = hass.config.time_zone;
+    if (loc.time_format === "12") opts.hour12 = true;
+    if (loc.time_format === "24") opts.hour12 = false;
+    try {
+      return new Intl.DateTimeFormat(loc.language || undefined, opts).format(new Date(iso));
+    } catch (err) {
+      return new Date(iso).toLocaleString();
+    }
+  };
+
   // Same list the old pyscript built: filter, then group (headers) and sort.
   // Array.prototype.sort is stable, like Python's sorted() (also with reverse).
+  // Devices that are not responding come first, in their own section.
   const buildList = (devices, groupBy, sortOrder, filterOn, low) => {
     const desc = sortOrder === "descending";
     const cmp = (a, b) => (desc ? b.value - a.value : a.value - b.value);
-    let items = devices.map((d) => ({ ...d, area_prefix: groupBy !== "area" }));
-    // Same test as the TBR mark and the integration's count: the reading itself.
-    if (filterOn) items = items.filter((d) => (parseFloat(d.state) || 0) <= low);
-    if (groupBy === "none") return [...items].sort(cmp);
+    const all = devices.map((d) => ({ ...d, status: statusOf(d, low), area_prefix: groupBy !== "area" }));
+    const out = [];
+    const broken = all
+      .filter((d) => d.status === "not_responding")
+      .map((d) => ({ ...d, area_prefix: true }))
+      .sort((a, b) => byLower(`${a.area || ""} ${a.name}`, `${b.area || ""} ${b.name}`));
+    if (broken.length) out.push({ header: true, notResponding: true, name: "Not responding" }, ...broken);
+    let items = all.filter((d) => d.status !== "not_responding");
+    // Same test as the TBR mark and the integration's count.
+    if (filterOn) items = items.filter((d) => d.status === "low");
+    if (groupBy === "none") return [...out, ...[...items].sort(cmp)];
     const key = groupBy === "area" ? "area" : "battery_type";
     const groups = new Map();
     for (const d of items) {
@@ -78,7 +106,6 @@ window.customCards.push({
       if (!groups.has(g)) groups.set(g, []);
       groups.get(g).push(d);
     }
-    const out = [];
     // Batteries without an area ("No area") or a known type ("Unknown") come last.
     const last = key === "area" ? "" : "Unknown";
     const names = [...groups.keys()].filter((g) => g !== last).sort(byLower);
@@ -89,6 +116,8 @@ window.customCards.push({
     }
     return out;
   };
+
+  const NOT_RESPONDING_ICON = "mdi:battery-alert-variant-outline";
 
   class BatteryStatesCard extends LitElement {
     static get properties() {
@@ -355,11 +384,14 @@ window.customCards.push({
       const { sort: sortOrder, group: groupBy, filter: filterOn } = this._prefs;
       const low = Number.isFinite(a.low_threshold) ? a.low_threshold : DEFAULT_LOW;
       const list = buildList(devices, groupBy, sortOrder, filterOn, low);
+      const broken = Number.isFinite(a.not_responding_count)
+        ? a.not_responding_count
+        : devices.filter((d) => statusOf(d, low) === "not_responding").length;
       return html`
         <ha-card class="main">
           <div class="stack">
             <div class="title"><div class="title-name">Battery States</div></div>
-            ${this._renderSummary(counts)}
+            ${this._renderSummary(counts, broken)}
             ${this._renderControls(sortOrder, groupBy, filterOn)}
             <div class="list">${list.map((d, i) => this._renderItem(d, list[i + 1], low))}</div>
           </div>
@@ -367,7 +399,7 @@ window.customCards.push({
       `;
     }
 
-    _renderSummary(counts) {
+    _renderSummary(counts, broken) {
       let total = 0;
       const rows = [];
       // Same order as the group-by-type headers: A to Z ignoring case, "Unknown" last.
@@ -393,6 +425,9 @@ window.customCards.push({
                 ${rows}
                 <tr><td colspan="2"><hr /></td></tr>
                 <tr class="total"><td>TOTAL:</td><td>${total}</td></tr>
+                ${broken
+                  ? html`<tr class="not-responding"><td>NOT RESPONDING:</td><td>${broken}</td></tr>`
+                  : ""}
               </tbody>
             </table>
           </div>
@@ -481,32 +516,44 @@ window.customCards.push({
 
     _renderItem(d, next, low) {
       if (d.header) {
-        return html`<ha-card class="header"><div class="header-text">${d.name}:</div></ha-card>`;
+        return html`<ha-card class="header ${d.notResponding ? "not-responding" : ""}"
+          ><div class="header-text">${d.name}:</div></ha-card
+        >`;
       }
       const stateObj = this.hass.states[d.entity_id];
-      const val = parseFloat(d.state) || 0;
+      const status = d.status || statusOf(d, low);
+      const broken = status === "not_responding";
       const base = d.area_prefix && d.area ? `${d.area}: ${d.name}` : d.name;
-      const shown = d.reading ? d.state : "0";
-      const stateText = stateObj
-        ? this.hass.formatEntityState
-          ? this.hass.formatEntityState(stateObj, shown)
-          : `${shown} %`
-        : "";
+      // reading: a level is known (a device not responding shows its last one).
+      const known = d.reading !== false;
+      const stateText = !known
+        ? "—"
+        : stateObj && this.hass.formatEntityState
+          ? this.hass.formatEntityState(stateObj, d.state)
+          : `${d.state} %`;
+      const since = broken ? formatWhen(this.hass, d.not_responding_since) : "";
       const separator = next && !next.header;
       return html`
-        <ha-card class="row ${separator ? "sep" : ""}" @click=${() => this._moreInfo(d.entity_id)}>
-          <ha-state-icon
-            class="row-icon"
-            style="color: ${iconColor(d.state)}"
-            .hass=${this.hass}
-            .stateObj=${stateObj}
-            .stateValue=${d.reading ? d.state : "unavailable"}
-          ></ha-state-icon>
+        <ha-card
+          class="row ${separator ? "sep" : ""} ${broken ? "not-responding" : ""}"
+          @click=${() => this._moreInfo(d.entity_id)}
+        >
+          ${broken
+            ? html`<ha-state-icon class="row-icon" .hass=${this.hass} .icon=${NOT_RESPONDING_ICON}></ha-state-icon>`
+            : html`<ha-state-icon
+                class="row-icon"
+                style="color: ${known ? iconColor(d.state) : "var(--disabled-text-color)"}"
+                .hass=${this.hass}
+                .stateObj=${stateObj}
+                .stateValue=${known ? d.state : "unavailable"}
+              ></ha-state-icon>`}
           <div class="text">
-            <div class="name ellipsis">${val <= low
+            <div class="name ellipsis">${status === "low"
               ? html`${base + "\u00a0\u00a0\u00a0"}<span class="tbr">*TBR!</span>`
               : base}</div>
-            <div class="label ellipsis">Battery Type: ${d.battery_type}</div>
+            <div class="label ellipsis">
+              Battery Type: ${d.battery_type}${since ? html`<span class="since"> · since ${since}</span>` : ""}
+            </div>
             <div class="state ellipsis">${stateText}</div>
           </div>
           <ha-ripple></ha-ripple>
@@ -527,9 +574,11 @@ window.customCards.push({
         }
         /* Background comes from the theme (ha-card's own default); change it,
            or anything else, with uix in the card config. Stable hooks:
-           ha-card.main, .title, ha-card.summary, .controls, .select-anchor,
-           .menu, .menu-item, ha-card.chip, .list, ha-card.header, ha-card.row,
-           .row-icon, .text, .name, .tbr, .label, .state */
+           ha-card.main, .title, ha-card.summary, tr.total, tr.not-responding,
+           .controls, .select-anchor, .menu, .menu-item, ha-card.chip, .list,
+           ha-card.header, ha-card.header.not-responding, ha-card.row,
+           ha-card.row.not-responding, .row-icon, .text, .name, .tbr, .label,
+           .since, .state */
         /* Corners too come from the theme (ha-card's own default). */
         ha-card.main {
           padding: 0;
@@ -973,6 +1022,19 @@ window.customCards.push({
           font-size: 10px;
           color: var(--error-color);
           vertical-align: top;
+        }
+        /* Devices not responding (their own section): the theme's warning colour,
+           the last known level faded. */
+        ha-card.header.not-responding .header-text,
+        ha-card.row.not-responding .row-icon {
+          color: var(--warning-color);
+        }
+        ha-card.row.not-responding .state {
+          color: var(--bs-text-faded);
+        }
+        tr.not-responding td {
+          color: var(--warning-color);
+          font-weight: bold;
         }
         .label {
           grid-column: 1 / 2; /* both lines: "1" alone would reach the far edge */

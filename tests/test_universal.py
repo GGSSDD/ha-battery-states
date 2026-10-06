@@ -6,7 +6,7 @@ from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_mock_service
 
 from .helpers import OLD, advance, make_zigbee_device, setup_bs, stopped_alerts
-from .test_regression import CURTAIN, fresh, make_curtain
+from .test_regression import CURTAIN, CURTAIN_R, fresh, make_curtains
 
 NOT_SEEN = 12 * 3600
 
@@ -21,7 +21,7 @@ async def test_notify_entity_sent_with_send_message(hass: HomeAssistant, freezer
     assert len(calls) == 1
     assert calls[0].data["entity_id"] == "notify.phone"
     assert calls[0].data["title"] == "Batteries"
-    assert "has stopped reporting" in calls[0].data["message"]
+    assert "is not responding" in calls[0].data["message"]
     log = entry.runtime_data.log[0]
     assert log["status"] == "sent" and log["targets"] == [{"service": "notify.phone", "ok": True}]
 
@@ -72,7 +72,7 @@ async def test_notify_choices(hass: HomeAssistant) -> None:
 
 # ------------------------------------------------- unavailable for the not-seen time
 async def test_short_outage_no_alert_and_timer_restarts(hass: HomeAssistant, freezer) -> None:
-    make_curtain(hass)
+    make_curtains(hass)
     calls = async_mock_service(hass, "notify", "test")
     hass.states.async_set(CURTAIN, "72")
     entry = await setup_bs(hass, include_integrations=["switchbot"])
@@ -92,7 +92,7 @@ async def test_short_outage_no_alert_and_timer_restarts(hass: HomeAssistant, fre
 
 
 async def test_unknown_ends_the_outage(hass: HomeAssistant, freezer) -> None:
-    make_curtain(hass)
+    make_curtains(hass)
     calls = async_mock_service(hass, "notify", "test")
     hass.states.async_set(CURTAIN, "72")
     entry = await setup_bs(hass, include_integrations=["switchbot"])
@@ -106,7 +106,7 @@ async def test_unknown_ends_the_outage(hass: HomeAssistant, freezer) -> None:
 
 
 async def test_not_seen_limit_applies(hass: HomeAssistant, freezer) -> None:
-    make_curtain(hass)
+    make_curtains(hass)
     calls = async_mock_service(hass, "notify", "test")
     hass.states.async_set(CURTAIN, "72")
     await setup_bs(hass, include_integrations=["switchbot"], not_seen_hours=2)
@@ -119,27 +119,28 @@ async def test_not_seen_limit_applies(hass: HomeAssistant, freezer) -> None:
 
 
 async def test_flag_from_older_version_kept(hass: HomeAssistant, freezer, hass_storage) -> None:
-    """Flagged by 1.0.11 (unavailable = not seen at once): stays flagged, no new alert."""
-    make_curtain(hass)
+    """Flagged and alerted by 1.0.x: the same silence isn't alerted again by 1.1.0."""
+    make_curtains(hass)
     calls = async_mock_service(hass, "notify", "test")
     entry = MockConfigEntry(domain="battery_states", entry_id="e1", data={},
                             options={"notify_service": ["notify.test"], "devices": [], "include_integrations": ["switchbot"]})
     hass_storage["battery_states.e1"] = {"version": 1, "key": "battery_states.e1", "data": {
         "observed_at": dt_util.utcnow().isoformat(),
-        "devices": {CURTAIN: {"state": "72", "last_seen": None, "not_seen": True}},
+        "devices": {CURTAIN: {"state": "72", "last_seen": None, "not_seen": True,
+                              "unavailable_since": (dt_util.utcnow() - timedelta(hours=13)).isoformat()}},
     }}
     hass.states.async_set(CURTAIN, "unavailable")
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done(wait_background_tasks=True)
-    assert entry.runtime_data._mem[CURTAIN]["not_seen"] is True
+    assert entry.runtime_data._mem[CURTAIN]["not_responding"]["source"] == "unavailable"
     await advance(hass, freezer, NOT_SEEN + 5)
     assert stopped_alerts(calls) == []
 
 
 async def test_downtime_credited(hass: HomeAssistant, freezer, hass_storage) -> None:
     """Unavailable for 11 h, then Home Assistant was off for 5 h: those 5 h don't count."""
-    make_curtain(hass)
+    make_curtains(hass)
     calls = async_mock_service(hass, "notify", "test")
     now = dt_util.utcnow()
     entry = MockConfigEntry(domain="battery_states", entry_id="e2", data={},

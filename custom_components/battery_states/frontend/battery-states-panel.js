@@ -44,7 +44,14 @@
 
   const WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
-  const KINDS = { low: "Low battery", not_seen: "Stopped reporting", reminder: "Reminder", test: "Test message" };
+  const KINDS = {
+    low: "Low battery",
+    not_responding: "Not responding",
+    recovered: "Responding again",
+    not_seen: "Stopped reporting", // before 1.1.0
+    reminder: "Reminder",
+    test: "Test message",
+  };
   const STATUS = {
     sending: ["Sending", "wait"],
     sent: ["Sent", "sent"],
@@ -53,6 +60,7 @@
     skipped: ["Skipped", "skip"],
     not_sent: ["Not sent", "fail"],
     unknown: ["Unknown", "skip"],
+    info: ["Noted", "skip"],
   };
 
   // The integration's alert texts (monitor.py), for the examples on this page.
@@ -60,10 +68,38 @@
   const word = (type) => (type === "Rechargeable" ? "recharging" : "replacing");
   const lowText = (name, area, type, percent) =>
     `The battery level for the device ${name.toUpperCase()}${where(area)}, with battery type: ${type.toUpperCase()}, has dropped to ${percent}%. Consider ${word(type)} soon!`;
-  const notSeenText = (name, area, type) =>
-    `The device ${name.toUpperCase()}${where(area)}, with battery type: ${type.toUpperCase()}, has stopped reporting. Its battery may be dead. Consider ${word(type)} it soon!`;
-  const reminderText = (count, low) =>
-    `You still have ${count} ${count === 1 ? "device" : "devices"} with the battery level below ${low}%. Consider replacing or recharging ${count === 1 ? "it" : "them"} soon!`;
+  // "4 Oct 14:43", as the integration writes times in its alerts.
+  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const alertTime = (t) =>
+    `${t.getDate()} ${MONTHS[t.getMonth()]} ${String(t.getHours()).padStart(2, "0")}:${String(t.getMinutes()).padStart(2, "0")}`;
+  const notRespondingText = (name, area, type, when, every, percent) =>
+    `The device ${name.toUpperCase()}${where(area)}, with battery type: ${type.toUpperCase()}, is not responding: no report since ${when}, while it usually reports at least every ${every}. Last battery level: ${percent}%. Check its battery, the device and its connection.`;
+  const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+  const reminderText = (low, broken, limit) => {
+    const parts = [];
+    if (low) parts.push(`${plural(low, "device", "devices")} with the battery level below ${limit}%`);
+    if (broken) parts.push(`${plural(broken, "device", "devices")} not responding`);
+    const advice =
+      low && !broken
+        ? `Consider replacing or recharging ${low === 1 ? "it" : "them"} soon!`
+        : broken && !low
+          ? `Check ${broken === 1 ? "it" : "them"} soon!`
+          : "Check them soon!";
+    return `You still have ${parts.join(" and ")}. ${advice}`;
+  };
+
+  // "45 minutes", "2 hours", "3 days" (as the integration writes them).
+  const duration = (seconds) => {
+    if (seconds < 3600) {
+      const m = Math.max(1, Math.round(seconds / 60));
+      return `${m} minute${m === 1 ? "" : "s"}`;
+    }
+    if (seconds < 48 * 3600) {
+      const h = Math.round(seconds / 3600);
+      return `${h} hour${h === 1 ? "" : "s"}`;
+    }
+    return `${Math.round(seconds / 86400)} days`;
+  };
 
   const COLUMNS = [
     { key: "area", label: "Area" },
@@ -228,6 +264,7 @@
         name: b.name,
         battery_type: b.battery_type,
         rechargeable: b.rechargeable,
+        silence: b.silence_hours == null ? "" : String(b.silence_hours),
         editingType: false,
       };
     }
@@ -240,6 +277,12 @@
     async _saveDialog() {
       const d = this._dialog;
       const typed = (d.battery_type || "").trim();
+      const silenceText = String(d.silence ?? "").trim();
+      const silence = silenceText === "" ? null : Number(silenceText);
+      if (silence !== null && !(Number.isInteger(silence) && silence >= 1 && silence <= 720)) {
+        this._error = { card: "dialog", message: "Not responding after: a whole number of hours from 1 to 720, or empty." };
+        return;
+      }
       const ok = await this._ws({
         type: "battery_states/update_battery",
         entity_id: d.battery.entity_id,
@@ -247,6 +290,7 @@
         // Typing the library's own type (or nothing) means: use the library.
         battery_type: typed === d.battery.auto_type ? "" : typed,
         rechargeable: !!d.rechargeable,
+        silence_hours: silence,
       }, "dialog");
       if (ok) this._closeDialog();
     }
@@ -293,6 +337,15 @@
               <ha-svg-icon slot="start" .path=${mdiPlus}></ha-svg-icon>Add battery
             </ha-button>
           </div>
+          ${(() => {
+            const unjudged = d.batteries.filter((b) => b.health && b.health.judged === false).length;
+            return unjudged
+              ? html`<div class="card-content judge-hint">
+                  ${unjudged === 1 ? "1 battery can't" : `${unjudged} batteries can't`} be checked for "not
+                  responding" yet: open ${unjudged === 1 ? "it" : "one"} to see why.
+                </div>`
+              : "";
+          })()}
           ${d.batteries.length
             ? this._renderTable(d.batteries)
             : html`<div class="card-content empty">No batteries yet.</div>`}
@@ -354,11 +407,11 @@
         { name: "low_threshold", selector: { number: { min: 1, max: 99, step: 1, mode: "box", unit_of_measurement: "%" } } },
         { name: "not_seen_hours", selector: { number: { min: 1, max: 168, step: 1, mode: "box", unit_of_measurement: "hours" } } },
       ];
-      const labels = { low_threshold: "Low battery limit", not_seen_hours: "Not seen after" };
+      const labels = { low_threshold: "Low battery limit", not_seen_hours: "Minimum silence" };
       const helpers = {
         low_threshold: "A battery at or below this is low: marked *TBR! on the card, counted, and alerted.",
         not_seen_hours:
-          "A device with a Last seen sensor that stays silent this long, or a device without one that stays unavailable this long, is shown as not seen (0 %). Time while Home Assistant or Zigbee2MQTT was down doesn't count.",
+          "A device counts as not responding only when it is silent far longer than usual for it (4 times its normal longest gap, learned from its own reports or from other devices of its model), never sooner than this, and only while the rest of its network works. Time Home Assistant or its network was down doesn't count. A battery's own limit (set by tapping it) replaces this.",
       };
       return html`
         <ha-card header="Limits">
@@ -407,6 +460,9 @@
       const a = this._alerts || {};
       const low = parseInt(this._limits?.low_threshold, 10) || d.limits?.low_threshold || 20;
       const hours = parseInt(this._limits?.not_seen_hours, 10) || d.limits?.not_seen_hours || 12;
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
+      yesterday.setHours(14, 43, 0, 0);
       // The examples use a battery from the list (one with an area if there is one).
       const b = d.batteries.find((x) => x.area) || d.batteries[0];
       const ex = b ? { name: b.shown_name, area: b.area, type: b.shown_type } : { name: "Window Contact", area: "Bedroom", type: "CR2032" };
@@ -428,15 +484,15 @@
             </div>
 
             <div class="alert-block ${a.alert_not_seen ? "" : "off"}">
-              ${this._alertForm([{ name: "alert_not_seen", selector: { boolean: {} } }], { alert_not_seen: "Stopped reporting" }, {
-                alert_not_seen: `When a device isn't heard from for ${hours} hours (a device without a Last seen sensor: unavailable for ${hours} hours). Once per silence.`,
+              ${this._alertForm([{ name: "alert_not_seen", selector: { boolean: {} } }], { alert_not_seen: "Not responding" }, {
+                alert_not_seen: `When a device goes silent far longer than usual for it (at least ${hours} hours) while the rest of its network works. Once per silence; not again if it drops out within a day of coming back.`,
               })}
-              ${this._example(notSeenText(ex.name, ex.area, ex.type))}
+              ${this._example(notRespondingText(ex.name, ex.area, ex.type, alertTime(yesterday), "2 hours", 100))}
             </div>
 
             <div class="alert-block ${a.reminder ? "" : "off"}">
               ${this._alertForm([{ name: "reminder", selector: { boolean: {} } }], { reminder: "Reminder" }, {
-                reminder: "On the chosen days, only while at least one battery is low or not seen.",
+                reminder: "On the chosen days, only while at least one battery is low or a device is not responding.",
               })}
               ${a.reminder
                 ? this._alertForm(
@@ -450,7 +506,7 @@
                     { reminder_days: "Days", reminder_time: "Time" }
                   )
                 : ""}
-              ${this._example(reminderText(1, low))}
+              ${this._example(reminderText(1, 1, low))}
             </div>
 
             <div class="alert-block ${a.quiet_hours ? "" : "off"}">
@@ -549,8 +605,13 @@
       const what = (e) => {
         const place = [e.name, e.area].filter(Boolean).join(", ");
         if (e.kind === "low") return [place, e.detail].filter(Boolean).join(", ");
-        if (e.kind === "not_seen") return place;
-        if (e.kind === "reminder") return `${e.detail} ${e.detail === "1" ? "battery" : "batteries"} low or not seen`;
+        if (["not_seen", "not_responding", "recovered"].includes(e.kind)) return place;
+        if (e.kind === "reminder") {
+          // Before 1.1.0 the detail was just the number.
+          return /^\d+$/.test(e.detail || "")
+            ? `${e.detail} ${e.detail === "1" ? "battery" : "batteries"} low or not seen`
+            : e.detail;
+        }
         return "";
       };
       return html`
@@ -597,7 +658,11 @@
           ${this._sorted(batteries).map(
             (b) => html`<div class="row item" role="row" @click=${() => this._openEdit(b)}>
               <span class="cell">${b.area || "—"}</span>
-              <span class="cell name">${b.shown_name}</span>
+              <span class="cell name"
+                >${b.shown_name}${b.health?.status === "not_responding"
+                  ? html` <span class="badge warn">Not responding</span>`
+                  : ""}</span
+              >
               <span class="cell">${b.shown_type}</span>
               <span class="cell edit">
                 <ha-icon-button .path=${mdiPencil} .label=${"Edit"}></ha-icon-button>
@@ -634,6 +699,64 @@
             ${d.mode === "add" ? this._renderAddDialog() : this._renderEditDialog(d)}
             ${this._error?.card === "dialog" ? html`<div class="dialog-error">${this._cardError("dialog")}</div>` : ""}
           </div>
+        </div>
+      `;
+    }
+
+    // How the battery is checked for "not responding", in words.
+    _renderHealth(b) {
+      const h = b.health || {};
+      if (!h.mode) return "";
+      const when = (iso) => (iso ? this._when(iso).join(", ") : "");
+      const model = h.model || "devices of its model";
+      const how = {
+        last_seen: "By its Last seen sensor.",
+        unavailable:
+          "When its integration marks it unavailable (some devices, like sleepy Bluetooth sensors, never are: set a limit below to watch those).",
+        activity: "By any update from the device (your limit below).",
+      }[h.mode];
+      let normal = "";
+      if (h.source === "own") normal = `Usually reports at least every ${duration(h.normal)} (its own rhythm).`;
+      else if (h.source === "model")
+        normal = `Usually reports at least every ${duration(h.normal)} (like ${h.twins} other ${model}).`;
+      let verdict;
+      if (h.judged) {
+        verdict =
+          h.source === "setting"
+            ? `Not responding after ${duration(h.threshold)} of silence (your limit).`
+            : h.source === "unavailable"
+              ? `Not responding after ${duration(h.threshold)} unavailable, while the rest of its network works.`
+              : `Not responding after ${duration(h.threshold)} of silence, while the rest of its network works.`;
+      } else {
+        verdict = {
+          learning: `Not checked yet: still learning how often it reports (${h.reports} reports over ${h.observed_days} days). It needs a steady rhythm over 3 days, or 2 other ${model} with one.`,
+          irregular: `Not checked: it reports irregularly, and there aren't 2 other ${model} with a steady rhythm to compare with. Set a limit below to watch it.`,
+          alone: "Not checked: no other monitored device on its network can show that the network works. Set a limit below to watch it anyway.",
+          no_report: "Not checked yet: no report from it so far.",
+        }[h.reason] || "Not checked.";
+      }
+      const network =
+        h.network === "down"
+          ? "Its network seems down right now: it isn't judged until the network works again."
+          : h.network === "alone" && h.judged
+            ? "Alone on its network: your limit is used without that check."
+            : "";
+      const status =
+        h.status === "not_responding"
+          ? html`<div class="health-status warn">Not responding since ${when(h.since)}</div>`
+          : "";
+      return html`
+        <div class="health">
+          <div class="health-title">Not responding check</div>
+          ${status}
+          <div>${how}</div>
+          ${normal ? html`<div>${normal}</div>` : ""}
+          <div>${verdict}</div>
+          ${network ? html`<div>${network}</div>` : ""}
+          ${h.last_report ? html`<div class="muted">Last report: ${when(h.last_report)}</div>` : ""}
+          ${b.last_seen_disabled
+            ? html`<div class="muted">Its Last seen sensor is disabled: enable it for the most precise check.</div>`
+            : ""}
         </div>
       `;
     }
@@ -731,9 +854,16 @@
             ></ha-checkbox>
             ${builtIn ? "Rechargeable (built-in battery, from the library)" : "Rechargeable"}
           </label>
-          ${b.last_seen_disabled
-            ? html`<ha-alert alert-type="info">Not-seen check off: its Last seen sensor is disabled.</ha-alert>`
-            : ""}
+          ${this._renderHealth(b)}
+          <ha-input
+            class="silence"
+            type="number"
+            .label=${"Not responding after (hours of silence)"}
+            .placeholder=${"Automatic"}
+            .hint=${"Empty = automatic. Set it for a device you know: it then counts as not responding after this much silence (1–720 hours), even alone on its network."}
+            .value=${d.silence}
+            @input=${(ev) => (this._dialog = { ...this._dialog, silence: ev.target.value ?? "" })}
+          ></ha-input>
         </div>
         <div class="dialog-actions">
           ${b.added
@@ -1109,6 +1239,44 @@
         }
         .dialog-error {
           padding: 0 24px 16px;
+        }
+        .health {
+          display: flex;
+          flex-direction: column;
+          gap: 4px;
+          padding: 10px 12px;
+          border-radius: 8px;
+          background: var(--secondary-background-color);
+          font-size: var(--ha-font-size-s, 13px);
+        }
+        .health-title {
+          color: var(--secondary-text-color);
+          font-size: 11px;
+          letter-spacing: 0.06em;
+          text-transform: uppercase;
+        }
+        .health-status.warn {
+          color: var(--warning-color, #ffa600);
+          font-weight: 500;
+        }
+        .health .muted,
+        .judge-hint {
+          color: var(--secondary-text-color);
+        }
+        .judge-hint {
+          padding-top: 0;
+          padding-bottom: 8px;
+        }
+        .badge {
+          border-radius: 10px;
+          padding: 1px 8px;
+          font-size: 11px;
+          font-weight: 500;
+          margin-left: 6px;
+        }
+        .badge.warn {
+          background: rgba(var(--rgb-warning-color, 255, 166, 0), 0.15);
+          color: var(--warning-color, #ffa600);
         }
       `;
     }

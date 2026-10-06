@@ -28,7 +28,7 @@ async def test_rename_keeps_override(hass: HomeAssistant, freezer) -> None:
     make_zigbee_device(hass)
     async_mock_service(hass, "notify", "test")
     fresh(hass)
-    entry = await setup_bs(hass, overrides={OLD: {"name": "Window Contact", "rechargeable": True}})
+    entry = await setup_bs(hass, silence=None, overrides={OLD: {"name": "Window Contact", "rechargeable": True}})
     er.async_get(hass).async_update_entity(OLD, new_entity_id=NEW)
     hass.states.async_set(NEW, "50")
     await hass.async_block_till_done(wait_background_tasks=True)
@@ -184,10 +184,9 @@ async def test_alerts_without_area(hass: HomeAssistant, freezer) -> None:
     await setup_bs(hass)
     hass.states.async_set(OLD, "15")
     await hass.async_block_till_done(wait_background_tasks=True)
-    assert stopped_alerts(calls) == [
-        "The device ZB BEDROOM WINDOW, with battery type: AAA, has stopped reporting. "
-        "Its battery may be dead. Consider replacing it soon!"
-    ]
+    assert len(stopped_alerts(calls)) == 1
+    assert stopped_alerts(calls)[0].startswith("The device ZB BEDROOM WINDOW, with battery type: AAA, is not responding: no report since ")
+    assert stopped_alerts(calls)[0].endswith(", longer than the 12 hours you set. Last battery level: 25%. Check its battery, the device and its connection.")
     assert low_alerts(calls) == [
         "The battery level for the device ZB BEDROOM WINDOW, with battery type: AAA, "
         "has dropped to 15%. Consider replacing soon!"
@@ -242,7 +241,7 @@ async def test_disabled_last_seen_reported_behaviour_unchanged(hass: HomeAssista
     make_zigbee_device(hass, last_seen_disabled=True)
     calls = async_mock_service(hass, "notify", "test")
     hass.states.async_set(OLD, "50")
-    entry = await setup_bs(hass)
+    entry = await setup_bs(hass, silence=None)
     mon = entry.runtime_data
     assert mon.devices[0].last_seen_entity is None  # not used, as before
     client = await hass_ws_client(hass)

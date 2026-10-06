@@ -1,6 +1,9 @@
 {
   "domain": "battery_states",
   "name": "Battery States",
+  "after_dependencies": [
+    "recorder"
+  ],
   "codeowners": [
     "@GGSSDD"
   ],
@@ -17,5 +20,5 @@
   "issue_tracker": "https://github.com/GGSSDD/ha-battery-states/issues",
   "requirements": [],
   "single_config_entry": true,
-  "version": "1.0.12"
+  "version": "1.1.0"
 }

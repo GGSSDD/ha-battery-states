@@ -21,17 +21,28 @@ def fresh(hass, value="50", hours_ago=0):
     hass.states.async_set(LAST_SEEN, (dt_util.utcnow() - timedelta(hours=hours_ago)).isoformat())
 
 
-def make_curtain(hass):
+CURTAIN_R = "sensor.lr_drape_r_battery"
+
+
+def make_curtain(hass, side="l"):
+    """A SwitchBot curtain (no Last seen sensor: judged by availability). Two
+    curtains are each other's evidence that the network works."""
     sb = MockConfigEntry(domain="switchbot")
     sb.add_to_hass(hass)
     dev = dr.async_get(hass).async_get_or_create(
-        config_entry_id=sb.entry_id, identifiers={("switchbot", "aa")}, name="LR Drape L",
+        config_entry_id=sb.entry_id, identifiers={("switchbot", f"a{side}")}, name=f"LR Drape {side.upper()}",
         manufacturer="SwitchBot", model="WoCurtain",
     )
-    er.async_get(hass).async_get_or_create(
-        "sensor", "switchbot", "aa_battery", suggested_object_id="lr_drape_l_battery",
+    return er.async_get(hass).async_get_or_create(
+        "sensor", "switchbot", f"a{side}_battery", suggested_object_id=f"lr_drape_{side}_battery",
         device_id=dev.id, original_device_class="battery", config_entry=sb,
-    )
+    ).entity_id
+
+
+def make_curtains(hass):
+    make_curtain(hass)
+    make_curtain(hass, "r")
+    hass.states.async_set(CURTAIN_R, "60")
 
 
 async def restart(hass, entry, freezer, down_seconds):
@@ -67,7 +78,8 @@ async def test_reading_survives_restart(hass: HomeAssistant, freezer) -> None:
 
 
 # ------------------------------------------------------------- not seen
-async def test_not_seen_after_12h_once_and_clears(hass: HomeAssistant, freezer) -> None:
+async def test_not_responding_after_own_setting_once_and_clears(hass: HomeAssistant, freezer) -> None:
+    """Its own setting (12 h): not responding once, shown apart (not low), back when it reports."""
     make_zigbee_device(hass)
     calls = async_mock_service(hass, "notify", "test")
     fresh(hass)
@@ -78,14 +90,20 @@ async def test_not_seen_after_12h_once_and_clears(hass: HomeAssistant, freezer) 
     await advance(hass, freezer, 10)
     assert mon._mem[OLD]["not_seen"] is True and len(stopped_alerts(calls)) == 1
     count, attrs = mon.snapshot()
-    assert count == 1 and attrs["devices"][0]["state"] == "0" and attrs["devices"][0]["reading"] is False
+    dev = attrs["devices"][0]
+    assert count == 0 and attrs["not_responding_count"] == 1
+    assert (dev["status"], dev["state"], dev["reading"]) == ("not_responding", "50", True)
+    assert dev["not_responding_since"] == mon._mem[OLD]["last_seen"]
+    assert hass.states.get("sensor.battery_states_not_responding").state == "1"
     await advance(hass, freezer, 24 * 3600)
     assert len(stopped_alerts(calls)) == 1
     hass.states.async_set(LAST_SEEN, dt_util.utcnow().isoformat())
     await hass.async_block_till_done(wait_background_tasks=True)
     assert mon._mem[OLD]["not_seen"] is False
     count, attrs = mon.snapshot()
-    assert count == 0 and attrs["devices"][0]["state"] == "50"
+    assert count == 0 and attrs["devices"][0]["status"] == "ok" and attrs["not_responding_count"] == 0
+    assert mon.log[0]["kind"] == "recovered" and mon.log[0]["status"] == "info"
+    assert hass.states.get("sensor.battery_states_not_responding").state == "0"
 
 
 async def test_zigbee2mqtt_down_time_is_credited(hass: HomeAssistant, freezer) -> None:
@@ -122,8 +140,8 @@ async def test_ha_down_time_is_credited(hass: HomeAssistant, freezer) -> None:
 
 
 async def test_curtain_unavailable_for_not_seen_time(hass: HomeAssistant, freezer) -> None:
-    """1.0.12: unavailable counts as not seen only after the not-seen time (12 h)."""
-    make_curtain(hass)
+    """Unavailable counts only after the minimum time (12 h), while the other curtain works."""
+    make_curtains(hass)
     calls = async_mock_service(hass, "notify", "test")
     hass.states.async_set(CURTAIN, "72")
     entry = await setup_bs(hass, include_integrations=["switchbot"])
@@ -170,9 +188,9 @@ async def test_not_seen_text_rechargeable(hass: HomeAssistant, freezer) -> None:
     calls = async_mock_service(hass, "notify", "test")
     fresh(hass, hours_ago=13)
     await setup_bs(hass, overrides={OLD: {"name": "TRVZB", "rechargeable": True}})
-    assert stopped_alerts(calls) == [
-        "The device TRVZB located in the BEDROOM, with battery type: RECHARGEABLE, has stopped reporting. Its battery may be dead. Consider recharging it soon!"
-    ]
+    assert len(stopped_alerts(calls)) == 1
+    assert stopped_alerts(calls)[0].startswith("The device TRVZB located in the BEDROOM, with battery type: RECHARGEABLE, is not responding: no report since ")
+    assert stopped_alerts(calls)[0].endswith(", longer than the 12 hours you set. Last battery level: 50%. Check its battery, the device and its connection.")
 
 
 @pytest.mark.parametrize(("day", "value", "sent"), [(6, "15", True), (5, "15", False), (6, "50", False), (8, "20", True), (10, "5", True)])
@@ -223,7 +241,10 @@ async def test_list_order_exclude_and_counts(hass: HomeAssistant, freezer) -> No
     count, attrs = mon.snapshot()
     assert count == 1
     assert attrs["battery_low_count"] == [{"AAA": 1}, {"Rechargeable": 0}, {"Unknown": 0}]
-    assert set(attrs["devices"][0]) == {"entity_id", "name", "battery_type", "area", "state", "value", "reading", "not_seen"}
+    assert set(attrs["devices"][0]) == {
+        "entity_id", "name", "battery_type", "area", "state", "value", "reading",
+        "status", "not_seen", "last_report", "not_responding_since",
+    }
     hass.config_entries.async_update_entry(entry, options={**entry.options, "exclude": [CURTAIN]})
     await hass.async_block_till_done(wait_background_tasks=True)
     assert [d.name for d in mon.devices] == ["B", "A", "Window Contact"]

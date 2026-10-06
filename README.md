@@ -7,10 +7,10 @@
 
 A Home Assistant integration that keeps an eye on all your batteries in one place.
 
-<img src="docs/images/card.png" alt="The Battery States card, grouped by area" width="420">
+<img src="docs/images/card.png" alt="The Battery States card, grouped by area, with a device that is not responding" width="420">
 
 - **A card** listing every battery with its level and battery type. Sort it, group it by area or by type, or show only the low ones.
-- **Alerts** when a battery runs low or a device stops reporting (its battery may be dead), plus an optional **reminder** while anything is still low.
+- **Alerts** when a battery runs low, and when a device is **not responding**: silent far longer than usual for it while the rest of its network works, which usually means a dead battery. Plus an optional **reminder**.
 - **Quiet hours** and a list of **recent alerts**, so you can see what was sent, held or skipped.
 - **A settings page** for everything: which batteries, names, battery types, limits and alerts. No YAML.
 - **Battery types filled in for you** from the [Battery Notes](https://github.com/andrew-codechimp/HA-Battery-Notes) community library, and you can correct any of them.
@@ -24,8 +24,8 @@ A Home Assistant integration that keeps an eye on all your batteries in one plac
 - [The card](#the-card)
 - [Styling the card with UIX](#styling-the-card-with-uix)
 - [Alerts](#alerts)
-- [Stopped reporting](#stopped-reporting)
-- [The low batteries sensor](#the-low-batteries-sensor)
+- [Not responding](#not-responding)
+- [The sensors](#the-sensors)
 - [Battery types](#battery-types)
 - [Troubleshooting](#troubleshooting)
 - [Removing](#removing)
@@ -77,10 +77,13 @@ Open it with **Settings → Devices & services → Battery States → Configure*
 Every monitored battery, sortable by area, name or type.
 
 - **Add battery** adds a single battery sensor.
+- A device that is not responding has a **Not responding** badge. A line above the list tells you how many batteries can't be checked for that yet.
 - Tap a battery to edit it:
   - **Name:** a friendly name. Empty means the device's name in Home Assistant.
   - **Battery type:** set or correct it. Empty means the type from the battery library.
   - **Rechargeable:** shown as *Rechargeable*; the alerts then say "recharging" instead of "replacing".
+  - **Not responding check:** how this battery is checked (its Last seen sensor, its availability or any update), how often it usually reports and where that comes from, its limit, and why it can't be checked if it can't.
+  - **Not responding after (hours of silence):** your own limit for this battery (1–720 hours). Empty means automatic. See [Not responding](#not-responding).
 - **Remove** takes back a battery you added by hand. If a filter also finds it, it stays on the list and keeps its settings.
 - **Exclude** hides a battery for good, even when a filter finds it.
 
@@ -99,7 +102,7 @@ Pick batteries automatically. A battery sensor that matches **any** filter is sh
 ### Limits
 
 - **Low battery limit** (1–99 %, default 20 %): a battery at or below this is low. It is marked `*TBR!` (to be replaced) on the card, counted and alerted.
-- **Not seen after** (1–168 hours, default 12): how long a device may stay silent before it counts as *not seen*. See [Stopped reporting](#stopped-reporting).
+- **Minimum silence** (1–168 hours, default 12): a device never counts as not responding sooner than this. See [Not responding](#not-responding).
 
 ### Alerts
 
@@ -109,7 +112,7 @@ Choose where alerts go and which ones are sent. Each section shows an example me
 
 ### Recent alerts
 
-The last 50 alerts and what happened to each: sent, held for quiet hours, skipped (and why), or not sent (and why, for example *doesn't exist* or *is unavailable* for a notify target).
+The last 50 alerts and what happened to each: sent, held for quiet hours, skipped (and why), or not sent (and why, for example *doesn't exist* or *is unavailable* for a notify target). It also notes, without sending anything, when a device is responding again.
 
 ## The card
 
@@ -127,11 +130,12 @@ That's all it needs. The card finds the integration's sensor by itself.
 
 What's on it:
 
-- **Summary**: the low batteries per battery type, and the total.
+- **Summary**: the low batteries per battery type and the total, plus a **Not responding** line while any device isn't.
+- **Not responding**: devices that aren't responding get their own section at the top, with their last known level and since when they've been silent. They're left out of the list below and the low counts until they respond again.
 - **Arrow**: sort by level, ascending or descending.
 - **Group by**: group by area or by battery type. The chip shows the current grouping; ✕ removes it.
-- **Filter** button: show only the low (or not seen) batteries.
-- **Each battery**: the icon colour runs from green (full) to red (empty), with the name, battery type and level. Tap it to open its details.
+- **Filter** button: show only what needs attention, i.e. the low batteries and the devices not responding.
+- **Each battery**: the icon colour runs from green (full) to red (empty), with the name, battery type and level. A battery that hasn't reported a level yet shows **—**. Tap it to open its details.
 
 Sort, group and filter are remembered **per Home Assistant user**: the same on all your devices, and separate for each person in the household.
 
@@ -147,7 +151,7 @@ grid_options:
 
 You can restyle any part of the card with [UIX (UI eXtension)](https://uix.lf.technology), the successor of card-mod. Install UIX, then add `uix: style:` to the card:
 
-<img src="docs/images/card-uix.png" alt="The card restyled with UIX: accent title, no summary, orange low marker, no divider lines" width="420">
+<img src="docs/images/card-uix.png" alt="The card restyled with UIX: accent title, no summary, no divider lines" width="420">
 
 ```yaml
 type: custom:battery-states-card
@@ -184,10 +188,14 @@ uix:
 | `ha-card.chip`, `.chip-name` | The grouping chip and its text |
 | `.list` | The battery list |
 | `ha-card.header`, `.header-text` | A group heading (area or type) |
+| `ha-card.header.not-responding` | The *Not responding* heading |
 | `ha-card.row` | One battery row |
+| `ha-card.row.not-responding` | A row in the *Not responding* section |
 | `.row-icon` | The battery icon |
 | `.name`, `.label`, `.state` | The name, the battery type line and the level |
+| `.since` | "since …" on a row that is not responding |
 | `.tbr` | The `*TBR!` low marker |
+| `tr.total`, `tr.not-responding` | The TOTAL and NOT RESPONDING lines of the summary |
 
 ### CSS variables
 
@@ -199,7 +207,7 @@ Set these on `:host` (with `!important`, since the card sets them itself):
 | `--bs-text-faded` | the text colour at 50 % | Battery type line, table values, summary border, filter icon |
 | `--bs-line` | the text colour at 15 % | Divider lines |
 
-The card also uses your theme's `--accent-color` (filter on, menu hover), `--error-color` (TOTAL, `*TBR!`), `--chip-background-color` (the chip) and the usual card variables such as `--ha-card-background`.
+The card also uses your theme's `--accent-color` (filter on, menu hover), `--error-color` (TOTAL, `*TBR!`), `--warning-color` (not responding), `--chip-background-color` (the chip) and the usual card variables such as `--ha-card-background`.
 
 ### More examples
 
@@ -272,71 +280,132 @@ All alerts have the title **Batteries**.
 | Alert | When | Example |
 | --- | --- | --- |
 | **Low battery** | A battery drops to or below the low limit. Once per drop: it can come again after the battery was replaced or recharged. | *The battery level for the device ALARM BUTTON located in the HALLWAY, with battery type: CR2032, has dropped to 20%. Consider replacing soon!* |
-| **Stopped reporting** | A device goes quiet for the *Not seen after* time. Once per silence. | *The device ALARM BUTTON located in the HALLWAY, with battery type: CR2032, has stopped reporting. Its battery may be dead. Consider replacing it soon!* |
-| **Reminder** | On the days and at the time you choose (default Tuesday, Thursday and Saturday at 20:00), only while at least one battery is low or not seen. | *You still have 2 devices with the battery level below 20%. Consider replacing or recharging them soon!* |
+| **Not responding** | A device goes silent far longer than usual for it while its network works (see [Not responding](#not-responding)). Once per silence. If it drops out again less than a day after it came back, no new alert is sent (Recent alerts still lists it). | *The device WINDOW CONTACT located in the BEDROOM, with battery type: CR2032, is not responding: no report since 4 Oct 14:43, while other SNZB-04 devices report at least every 1 hour. Last battery level: 100%. Check its battery, the device and its connection.* |
+| **Reminder** | On the days and at the time you choose (default Tuesday, Thursday and Saturday at 20:00), only while at least one battery is low or a device is not responding. | *You still have 2 devices with the battery level below 20% and 1 device not responding. Check them soon!* |
 
 Each alert can be switched off on its own.
 
-**Quiet hours** (off by default, e.g. 22:00–07:00): alerts that come up in this window wait until it ends. They are then sent only if they are still true: a battery that was replaced in the meantime, or a device that reported again, is skipped. A reminder due in the window is sent when it ends, with the count at that moment.
+The *not responding* message says why: *"while other SNZB-04 devices report at least every 1 hour"* (judged by its model), *"while it usually reports at least every 2 hours"* (its own rhythm), *"longer than the 24 hours you set"* (your limit), or *"unavailable since …, while other devices on its network work"*.
 
-Alerts that come up while Home Assistant is still starting wait until it has started, so notify services such as the mobile app exist.
+**Quiet hours** (off by default, e.g. 22:00–07:00): alerts that come up in this window wait until it ends. They are then sent only if they are still true: a battery that was replaced in the meantime, or a device that responded again, is skipped. A reminder due in the window is sent when it ends, with the counts at that moment.
 
-## Stopped reporting
+Alerts that come up while Home Assistant is still starting wait until it has started, so notify services such as the mobile app exist. Devices aren't judged for *not responding* until Home Assistant has started.
 
-A battery-powered device that dies usually just goes quiet, so its last level stays on screen. Battery States notices this in one of two ways:
+## Not responding
 
-- **The device has a Last seen sensor** (for example Zigbee2MQTT): it counts as *not seen* when it hasn't been heard from for the **Not seen after** time.
-- **No Last seen sensor**: it counts as *not seen* when its battery sensor stays **unavailable** for the **Not seen after** time. A short outage, such as an integration reload, a Wi-Fi or cloud blip or a hub restart, doesn't count.
+A battery-powered device that dies usually just goes quiet, so its last level stays on screen. Battery States lists a device as **not responding** only when the evidence shows the problem is in **that device**: its battery, the device itself or its own connection. It must not be your network, Home Assistant, or simply a device that is quiet by nature. If that can't be shown, it doesn't guess. The device stays in the normal list, and its pop-up on the settings page says why it can't be checked.
 
-Time while Home Assistant (or, with a Last seen sensor, Zigbee2MQTT) was down is not counted as silence. A *not seen* battery shows as 0 % and counts as low.
+### When a device counts as not responding
 
-If a device has **neither** a Last seen sensor nor ever goes unavailable, a dead battery can't be noticed. Some setups need a setting changed:
+All three of these must hold:
 
-- **Zigbee2MQTT**: turn on one of these, or both:
-  - **Last seen**: Zigbee2MQTT **Settings → Advanced → Last seen** = `ISO_8601`. Then, in Home Assistant, **enable** the device's *Last seen* entity (it's created disabled). The settings page tells you when a battery's Last seen sensor is disabled.
-  - **Availability**: Zigbee2MQTT **Settings → Availability**, so that silent devices become unavailable.
-- **ZHA**: battery-powered devices become unavailable after a set time without messages (a ZHA option), so this works without changes.
+1. **Battery States knows what's normal for it**, in this order:
+   - **Your limit** for that battery (*Not responding after … hours*), if you set one.
+   - **Its own steady rhythm**: once it has reported for at least 3 days, at least 10 times, on most of those days, the longest gap that keeps coming back is its normal.
+   - **Other devices of the same model**: if its own reports aren't steady (often the case when it is failing), the middle value of at least 2 other monitored devices of the same model with a steady rhythm.
+   - Otherwise it can't be checked.
+2. **Its silence is far beyond that normal**: at least 4 times its normal longest gap, and never sooner than the *Minimum silence* setting (12 hours by default). Your own limit is used exactly as you set it.
+3. **Its network demonstrably works**: another monitored device on the same integration and the same hub (e.g. the same Zigbee2MQTT bridge or ZHA coordinator) is responding normally right now. Time Home Assistant, its network or its Last seen sensor was down doesn't count as silence.
 
-## The low batteries sensor
+Devices **without a Last seen sensor** are judged by their integration's own verdict instead: unavailable for at least the minimum silence, while other devices on the same network are available.
 
-`sensor.battery_states_low_batteries` holds the number of low (or not seen) batteries. Use it for a badge, a conditional card or your own automations.
+<img src="docs/images/settings-popup.png" alt="A battery's pop-up on the settings page: its Not responding check" width="420">
+
+The pop-up of each battery on the settings page shows its *Not responding check*: how it's heard from, what's normal for it and where that comes from, its limit, and, if it can't be checked, why.
+
+### How the normal is kept honest
+
+- A silence that counted as *not responding* is never learned as normal. A failing device can't teach Battery States to accept its own silence.
+- The normal only goes **up** for a new rhythm that holds on 3 days in a row (or 3 silences of the same length in a week), e.g. a device you set up to report less often. Gaps that keep growing, as with a slowly dying battery, don't raise it.
+- It goes **down** after a week in which the device reported more often.
+- On first start it learns from your recorder's history (up to the last 14 days), so it can judge straight away. If the recorder doesn't keep those sensors, it learns as devices report: within a day for chatty devices.
+
+### How each kind of device is heard
+
+| Devices | How Battery States hears from them | Works out of the box? |
+| --- | --- | --- |
+| **Zigbee2MQTT** | The device's *Last seen* sensor, or *unavailable* with Zigbee2MQTT's Availability | After turning one on (below) |
+| **ZHA** | *Unavailable*: ZHA marks battery devices unavailable after 6 hours without messages (a ZHA option) | Yes |
+| **Z-Wave JS** | The device's *Last seen* sensor (created disabled: enable it) | After enabling it |
+| **Matter / Thread** | *Unavailable* when the device stops responding | Yes |
+| **Bluetooth** (SwitchBot, Govee, Inkbird, …) | *Unavailable* when its advertisements stop | Yes |
+| **Shelly** battery devices | *Unavailable* when they miss their wake-ups | Yes |
+| **Cloud integrations** (Tuya, Netatmo, Ring, …) | *Unavailable*, where the cloud reports devices offline | Usually |
+| **Sleepy Bluetooth sensors** (some BTHome, Xiaomi), **ESPHome in deep sleep**, phones | Never marked unavailable: no signal | Only with your own limit (below) |
+
+**Zigbee2MQTT settings:** turn on one of these, or both:
+- **Last seen** (best): Zigbee2MQTT **Settings → Advanced → Last seen** = `ISO_8601`. Then, in Home Assistant, **enable** each device's *Last seen* entity (it's created disabled). The battery's pop-up tells you when its Last seen sensor is disabled.
+- **Availability**: Zigbee2MQTT **Settings → Availability**, so that silent devices become unavailable.
+
+### What can't be checked, and your own limit
+
+A device can't be checked when there's no reliable evidence:
+- **No normal yet:** too few reports, an irregular rhythm, and no 2 steady devices of its model.
+- **Alone on its network:** no other monitored device can show that the network works.
+- **No signal:** its integration never marks it unavailable and it has no Last seen sensor.
+
+For such a device, set **Not responding after … hours** in its pop-up. You know the device, so you vouch for its rhythm: it then counts as not responding after that much silence, even alone on its network. A device without a Last seen sensor is then watched by **any update from it**, from any of its sensors.
+
+**Example:** a sleepy Bluetooth thermometer that sends something at least every 2 hours: set *Not responding after* to 6.
+
+### Good to know
+
+- When a whole network goes quiet at once (a coordinator or bridge down), nobody is listed. That's a network problem, not a device problem.
+- Home Assistant doesn't record which Bluetooth adapter or proxy a device is heard through. If one Bluetooth proxy dies, the devices that depended on it can be listed while others are fine. Their connection really is broken, which is why the message says "check its battery, the device and its connection".
+- A device that is not responding keeps its last known level on the card, but isn't counted as low. The moment it responds again, it's back in the list and the counts.
+
+## The sensors
+
+| Sensor | State |
+| --- | --- |
+| `sensor.battery_states_low_batteries` | The number of low batteries among the devices that respond |
+| `sensor.battery_states_not_responding` | The number of devices that are not responding (attribute `entity_ids`: their batteries) |
+
+`sensor.battery_states_low_batteries` also holds the data the card shows:
 
 | Attribute | Content |
 | --- | --- |
 | `low_threshold` | The low battery limit, in % |
 | `battery_low_count` | Low batteries per battery type, e.g. `[{"CR2032": 2}, {"AAA": 0}]` |
-| `devices` | Every battery: `entity_id`, `name`, `area`, `battery_type`, `state` (text), `value` (number), `reading` (false when there is no real reading), `not_seen` |
+| `not_responding_count` | Devices not responding |
+| `devices` | Every battery: `entity_id`, `name`, `area`, `battery_type`, `state` (its last level as text), `value` (number), `reading` (false while no level is known), `status` (`ok`, `low` or `not_responding`), `last_report`, `not_responding_since` |
 
-**Badge at the top of a view:**
+**Badges at the top of a view:**
 
 ```yaml
 badges:
   - type: entity
     entity: sensor.battery_states_low_batteries
+  - type: entity
+    entity: sensor.battery_states_not_responding
 ```
 
-**The low batteries as a list** (Markdown card):
+**What needs attention, as a list** (Markdown card):
 
 ```yaml
 type: markdown
 content: |
-  {% set s = 'sensor.battery_states_low_batteries' %}
-  {% set low = state_attr(s, 'low_threshold') %}
-  {% for d in state_attr(s, 'devices') if d.value <= low %}
-  - **{{ d.name }}** ({{ d.area or 'no area' }}): {{ 'not seen' if d.not_seen else d.state ~ ' %' }}
+  {% set devices = state_attr('sensor.battery_states_low_batteries', 'devices') %}
+  {% for d in devices if d.status != 'ok' %}
+  - **{{ d.name }}** ({{ d.area or 'no area' }}): {{ 'not responding' if d.status == 'not_responding' else d.state ~ ' %' }}
   {% else %}
   All batteries are fine.
   {% endfor %}
 ```
 
-**Show the card only while something is low:**
+**Show the card only while something needs attention:**
 
 ```yaml
 type: conditional
 conditions:
-  - condition: numeric_state
-    entity: sensor.battery_states_low_batteries
-    above: 0
+  - condition: or
+    conditions:
+      - condition: numeric_state
+        entity: sensor.battery_states_low_batteries
+        above: 0
+      - condition: numeric_state
+        entity: sensor.battery_states_not_responding
+        above: 0
 card:
   type: custom:battery-states-card
 ```
@@ -352,7 +421,8 @@ Each device's battery type is looked up in the [Battery Notes](https://github.co
 | The card says **Battery States is not set up** | Add the integration (see [Setup](#setup)). |
 | The card says **Entity not available: …** | The `entity` set in the card doesn't exist. Remove the option and the card finds the sensor itself. |
 | A battery type is **Unknown** | The library doesn't know the device. Set the type on the settings page. |
-| A battery never shows *not seen* | See [Stopped reporting](#stopped-reporting). If the edit pop-up says *Not-seen check off: its Last seen sensor is disabled*, enable that entity. |
+| A device is never listed as *not responding* | Open the battery on the settings page: its *Not responding check* says how it's checked, or why it can't be. See [Not responding](#not-responding). If it says its Last seen sensor is disabled, enable that entity. |
+| A device is listed as *not responding* but works | It went silent far longer than usual while its network worked. If you know it reports rarely, set its *Not responding after* limit. |
 | An alert wasn't received | Check **Recent alerts** on the settings page: it says whether the alert was sent, held, skipped or not sent, and why. |
 | A UIX rule does nothing | Add `!important` (see [Styling the card with UIX](#styling-the-card-with-uix)). |
 
