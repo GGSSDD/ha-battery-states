@@ -77,7 +77,7 @@ Open it with **Settings → Devices & services → Battery States → Configure*
 Every monitored battery, sortable by area, name or type.
 
 - **Add battery** adds a single battery sensor.
-- A device that is not responding has a **Not responding** badge. A line above the list tells you how many batteries can't be checked for that yet.
+- A device that is not responding has a **Non-responsive** badge. A line above the list tells you how many batteries can't be checked for that yet.
 - Tap a battery to edit it:
   - **Name:** a friendly name. Empty means the device's name in Home Assistant.
   - **Battery type:** set or correct it. Empty means the type from the battery library.
@@ -141,8 +141,8 @@ load_minimized: true
 
 What's on it:
 
-- **Summary**: the low batteries per battery type and the total, plus a **Not responding** line while any device isn't.
-- **Not responding**: devices that aren't responding get their own section at the top, with a battery-unknown icon, **N/A** instead of a level (the last one can't be trusted: a silent device can still say 100 %) and since when they've been silent. They're left out of the list below and the low counts until they respond again.
+- **Summary**: the low batteries per battery type and the total, plus a **NON-RESPONSIVE** line while any device isn't responding.
+- **Non-responsive devices**: devices that aren't responding get their own section at the top, with a battery-unknown icon, **N/A** instead of a level (the last one can't be trusted: a silent device can still say 100 %) and since when they've been silent. They're left out of the list below and the low counts until they respond again. Without grouping, the rest of the list then gets a **Devices** heading.
 - **Arrow**: sort by level, ascending or descending.
 - **Group by**: group by area or by battery type. The chip shows the current grouping; ✕ removes it.
 - **Filter** button: show only what needs attention, i.e. the low batteries and the devices not responding.
@@ -179,7 +179,7 @@ uix:
       color: var(--warning-color) !important;
     }
     :host {
-      --bs-line: transparent !important;
+      --battery-states-line: transparent !important;
     }
 ```
 
@@ -199,14 +199,14 @@ uix:
 | `ha-card.chip`, `.chip-name` | The grouping chip and its text |
 | `.list` | The battery list |
 | `ha-card.header`, `.header-text` | A group heading (area or type) |
-| `ha-card.header.not-responding` | The *Not responding* heading |
+| `ha-card.header.not-responding` | The *Non-responsive devices* heading |
 | `ha-card.row` | One battery row |
-| `ha-card.row.not-responding` | A row in the *Not responding* section |
+| `ha-card.row.not-responding` | A row in the *Non-responsive devices* section |
 | `.row-icon` | The battery icon |
 | `.name`, `.label`, `.state` | The name, the battery type line and the level |
 | `.since` | "since …" on a row that is not responding |
 | `.tbr` | The `*TBR!` low marker |
-| `tr.total`, `tr.not-responding` | The TOTAL and NOT RESPONDING lines of the summary |
+| `tr.total`, `tr.not-responding` | The TOTAL and NON-RESPONSIVE lines of the summary |
 
 ### CSS variables
 
@@ -214,11 +214,13 @@ Set these on `:host` (with `!important`, since the card sets them itself):
 
 | Variable | Default | Used for |
 | --- | --- | --- |
-| `--bs-text` | the theme's text colour | Table headings, Group by text |
-| `--bs-text-faded` | the text colour at 50 % | Battery type line, table values, summary border, filter icon |
-| `--bs-line` | the text colour at 15 % | Divider lines |
+| `--battery-states-text` | the theme's text colour | Table headings, Group by text |
+| `--battery-states-text-faded` | the text colour at 50 % | Battery type line, table values, filter icon, N/A |
+| `--battery-states-line` | the theme's divider colour (`--divider-color`), always at 15 % | Divider lines |
+| `--battery-states-summary-border` | the theme's card border colour (`--ha-card-border-color`, else `--divider-color`), always at 50 % | The summary box border |
+| `--battery-states-not-responding` | Home Assistant's colour for unavailable states (`--state-unavailable-color`) | The *Non-responsive devices* heading, icon and summary line |
 
-The card also uses your theme's `--accent-color` (filter on, menu hover), `--error-color` (TOTAL, `*TBR!`), `--warning-color` (not responding), `--chip-background-color` (the chip) and the usual card variables such as `--ha-card-background`.
+The card also uses your theme's `--accent-color` (filter on, menu hover), `--error-color` (TOTAL, `*TBR!`), `--chip-background-color` (the chip) and the usual card variables such as `--ha-card-background`.
 
 ### More examples
 
@@ -253,8 +255,8 @@ uix:
 uix:
   style: |
     :host {
-      --bs-text-faded: var(--secondary-text-color) !important;
-      --bs-line: transparent !important;
+      --battery-states-text-faded: var(--secondary-text-color) !important;
+      --battery-states-line: transparent !important;
     }
 ```
 

@@ -660,7 +660,7 @@
               <span class="cell">${b.area || "—"}</span>
               <span class="cell name"
                 >${b.shown_name}${b.health?.status === "not_responding"
-                  ? html` <span class="badge warn">Not responding</span>`
+                  ? html` <span class="badge warn">Non-responsive</span>`
                   : ""}</span
               >
               <span class="cell">${b.shown_type}</span>

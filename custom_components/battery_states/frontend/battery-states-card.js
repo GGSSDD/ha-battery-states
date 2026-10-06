@@ -93,11 +93,16 @@ window.customCards.push({
       .filter((d) => d.status === "not_responding")
       .map((d) => ({ ...d, area_prefix: true }))
       .sort((a, b) => byLower(`${a.area || ""} ${a.name}`, `${b.area || ""} ${b.name}`));
-    if (broken.length) out.push({ header: true, notResponding: true, name: "Not responding" }, ...broken);
+    if (broken.length) out.push({ header: true, notResponding: true, name: "Non-responsive devices" }, ...broken);
     let items = all.filter((d) => d.status !== "not_responding");
     // Same test as the TBR mark and the integration's count.
     if (filterOn) items = items.filter((d) => d.status === "low");
-    if (groupBy === "none") return [...out, ...[...items].sort(cmp)];
+    if (groupBy === "none") {
+      // Without groups the rest gets its own heading while there's a section above
+      // it, so it doesn't look like part of the non-responsive devices.
+      const rest = [...items].sort(cmp);
+      return out.length && rest.length ? [...out, { header: true, name: "Devices" }, ...rest] : [...out, ...rest];
+    }
     const key = groupBy === "area" ? "area" : "battery_type";
     const groups = new Map();
     for (const d of items) {
@@ -480,7 +485,7 @@ window.customCards.push({
                 <tr><td colspan="2"><hr /></td></tr>
                 <tr class="total"><td>TOTAL:</td><td>${total}</td></tr>
                 ${broken
-                  ? html`<tr class="not-responding"><td>NOT RESPONDING:</td><td>${broken}</td></tr>`
+                  ? html`<tr class="not-responding"><td>NON-RESPONSIVE:</td><td>${broken}</td></tr>`
                   : ""}
               </tbody>
             </table>
@@ -627,12 +632,26 @@ window.customCards.push({
       return css`
         :host {
           display: block;
-          /* Text and line colours follow the theme's text colour, so the card
-             reads on light and dark themes alike (on a theme whose text is
-             white these are exactly the old fixed whites). */
-          --bs-text: var(--primary-text-color);
-          --bs-text-faded: color-mix(in srgb, var(--primary-text-color) 50%, transparent);
-          --bs-line: color-mix(in srgb, var(--primary-text-color) 15%, transparent);
+          /* Colours from the theme, so the card reads on light and dark themes
+             alike (override any of these with uix). Text: the theme's text colour. */
+          --battery-states-text: var(--primary-text-color);
+          --battery-states-text-faded: color-mix(in srgb, var(--primary-text-color) 50%, transparent);
+          /* Dividers: the theme's divider colour, always at 15 % (whatever the
+             theme's own opacity is). Summary border: the theme's card border
+             colour (else its dividers), always at 50 %. The lines below are for
+             browsers without relative colours. */
+          --battery-states-line: color-mix(in srgb, var(--primary-text-color) 15%, transparent);
+          --battery-states-summary-border: color-mix(in srgb, var(--primary-text-color) 50%, transparent);
+          /* Home Assistant's own colour for unavailable / unknown states. */
+          --battery-states-not-responding: var(--state-unavailable-color, var(--disabled-text-color));
+        }
+        @supports (color: rgb(from red r g b / 0.5)) {
+          :host {
+            --battery-states-line: rgb(from var(--divider-color) r g b / 0.15);
+            --battery-states-summary-border: rgb(
+              from var(--ha-card-border-color, var(--divider-color)) r g b / 0.5
+            );
+          }
         }
         /* Background comes from the theme (ha-card's own default); change it,
            or anything else, with uix in the card config. Stable hooks:
@@ -697,7 +716,7 @@ window.customCards.push({
           margin: 15px;
           border-radius: 5px;
           background: none;
-          border: 2px solid var(--bs-text-faded);
+          border: 2px solid var(--battery-states-summary-border);
         }
         .summary-body {
           padding: 10px 15px;
@@ -715,14 +734,14 @@ window.customCards.push({
         }
         th {
           padding: 0.25em 0;
-          color: var(--bs-text);
+          color: var(--battery-states-text);
           font-weight: 500;
           font-size: 14px;
           line-height: 1.6;
         }
         td {
           padding: 0.25em 0;
-          color: var(--bs-text-faded);
+          color: var(--battery-states-text-faded);
           font-size: 11px;
         }
         th:first-child,
@@ -739,7 +758,7 @@ window.customCards.push({
           padding: 0;
           margin: 0 -1px;
           border: none;
-          border-top: 0.5px solid var(--bs-line);
+          border-top: 0.5px solid var(--battery-states-line);
         }
         tr.total td {
           color: var(--error-color);
@@ -811,7 +830,7 @@ window.customCards.push({
           height: 20px;
           left: auto;
           right: 0;
-          color: var(--bs-text-faded);
+          color: var(--battery-states-text-faded);
         }
         .filter-icon.on {
           color: var(--accent-color);
@@ -876,7 +895,7 @@ window.customCards.push({
           min-width: 0;
           text-overflow: ellipsis;
           overflow: hidden;
-          color: var(--bs-text);
+          color: var(--battery-states-text);
           font-size: 18px;
           font-weight: 400;
           letter-spacing: 0.25px;
@@ -1057,7 +1076,7 @@ window.customCards.push({
           right: 15px;
           bottom: 0;
           height: 0;
-          border-top: 0.5px solid var(--bs-line);
+          border-top: 0.5px solid var(--battery-states-line);
           pointer-events: none;
         }
         .row-icon {
@@ -1095,17 +1114,17 @@ window.customCards.push({
           color: var(--error-color);
           vertical-align: top;
         }
-        /* Devices not responding (their own section): the theme's warning colour,
-           the last known level faded. */
+        /* Devices not responding (their own section): Home Assistant's colour for
+           unavailable states; "N/A" faded. */
         ha-card.header.not-responding .header-text,
         ha-card.row.not-responding .row-icon {
-          color: var(--warning-color);
+          color: var(--battery-states-not-responding);
         }
         ha-card.row.not-responding .state {
-          color: var(--bs-text-faded);
+          color: var(--battery-states-text-faded);
         }
         tr.not-responding td {
-          color: var(--warning-color);
+          color: var(--battery-states-not-responding);
           font-weight: bold;
         }
         .label {
@@ -1116,7 +1135,7 @@ window.customCards.push({
           transform: translateY(-50%);
           max-width: 100%;
           font-size: 11px;
-          color: var(--bs-text-faded);
+          color: var(--battery-states-text-faded);
           line-height: 1;
         }
         .state {
