@@ -311,6 +311,7 @@ class BatteryMonitor:
         self._report_unsub: CALLBACK_TYPE | None = None
         self._reeval_unsub: CALLBACK_TYPE | None = None
         self._seed_task: asyncio.Task[None] | None = None
+        self._seed_again = False
 
     # ------------------------------------------------------------------ setup
 
@@ -441,14 +442,28 @@ class BatteryMonitor:
 
     @callback
     def _start_seeding(self) -> None:
-        if self._seed_task is None and not self._stopped:
-            self._seed_task = self.hass.async_create_background_task(
-                self._async_seed(), f"{DOMAIN} history"
-            )
+        """Learn from the history for batteries that haven't been yet: on the
+        first start, and for batteries added later (by hand or by a filter)."""
+        if self._stopped or self.hass.state is not CoreState.running:
+            return
+        if self._seed_task is not None and not self._seed_task.done():
+            self._seed_again = True  # a pass is running: one more after it
+            return
+        self._seed_again = False
+        self._seed_task = self.hass.async_create_background_task(
+            self._async_seed(), f"{DOMAIN} history"
+        )
 
     async def _async_seed(self) -> None:
         """Learn each device's rhythm from the recorder's history right away
-        (once), instead of waiting days to learn it from new reports."""
+        (once per battery), instead of waiting days to learn it from new reports."""
+        while True:
+            await self._async_seed_pass()
+            if self._stopped or not self._seed_again:
+                return
+            self._seed_again = False
+
+    async def _async_seed_pass(self) -> None:
         if "recorder" not in self.hass.config.components:
             return
         from homeassistant.components.recorder import get_instance, history  # noqa: PLC0415
@@ -593,6 +608,7 @@ class BatteryMonitor:
         if self.devices != old:
             self._track()
             self._evaluate_all()
+            self._start_seeding()  # batteries new on the list learn from history too
 
     @callback
     def _resolve_devices(self) -> None:

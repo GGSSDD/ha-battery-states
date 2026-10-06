@@ -330,3 +330,32 @@ async def test_settings_page_setting_and_diagnostics(hass: HomeAssistant, freeze
     assert (await ws(type="battery_states/update_battery", entity_id=OLD, silence_hours=721))["success"] is False
     await ws(type="battery_states/update_battery", entity_id=OLD)
     assert OLD not in entry.options.get("overrides", {})
+
+
+async def test_battery_added_later_learns_from_history(hass: HomeAssistant, freezer) -> None:
+    """Not only on the first start: a battery that joins the list later is learned from history too."""
+    make_zigbee_device(hass)
+    async_mock_service(hass, "notify", "test")
+    now = dt_util.utcnow()
+    history = [State(LAST_SEEN, (now - timedelta(minutes=50 * i)).isoformat()) for i in range(1, 5 * 24 * 60 // 50)]
+    hass.config.components.add("recorder")
+    calls = []
+
+    class Recorder:
+        def async_add_executor_job(self, func):
+            calls.append(func)
+            return hass.async_add_executor_job(func)
+
+    with (
+        patch("homeassistant.components.recorder.get_instance", return_value=Recorder()),
+        patch("homeassistant.components.recorder.history.state_changes_during_period",
+              return_value={LAST_SEEN: history}),
+    ):
+        fresh(hass)
+        entry = await setup_bs(hass, silence=None, include_integrations=[])  # nothing on the list yet
+        await hass.async_block_till_done(wait_background_tasks=True)
+        assert entry.runtime_data.devices == [] and calls == []
+        hass.config_entries.async_update_entry(entry, options={**entry.options, "include_integrations": ["mqtt"]})
+        await hass.async_block_till_done(wait_background_tasks=True)
+    stats = entry.runtime_data._mem[OLD]["stats"]
+    assert len(calls) == 1 and stats["seeded"] is True and stats["base"] == 50 * 60
