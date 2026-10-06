@@ -9,7 +9,7 @@ from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import async_mock_service
 
 from .helpers import (
-    LAST_SEEN, OLD, advance, advance_beating, low_alerts, make_twin, make_zigbee_device, setup_bs, stopped_alerts, teach,
+    LAST_SEEN, OLD, advance, low_alerts, make_twin, make_zigbee_device, setup_bs, stopped_alerts, teach,
 )
 
 def at(day, hour, minute=0, second=0):
@@ -42,7 +42,7 @@ async def test_low_limit_setting(hass: HomeAssistant, freezer) -> None:
     make_zigbee_device(hass)
     calls = async_mock_service(hass, "notify", "test")
     fresh(hass, "35")
-    entry = await setup_bs(hass, silence=None, low_threshold=30)
+    await setup_bs(hass, silence=None, low_threshold=30)
     hass.states.async_set(OLD, "28")
     await hass.async_block_till_done(wait_background_tasks=True)
     assert low_alerts(calls) and "dropped to 28%" in low_alerts(calls)[0]
@@ -381,7 +381,7 @@ async def test_quiet_end_on_autumn_clock_change(hass: HomeAssistant, freezer) ->
     calls = async_mock_service(hass, "notify", "test")
     freezer.move_to(datetime(2026, 10, 24, 13, 0, tzinfo=tz))
     fresh(hass)
-    entry = await setup_bs(hass, quiet_hours=True, quiet_from="22:00:00", quiet_to="03:30:00")
+    await setup_bs(hass, quiet_hours=True, quiet_from="22:00:00", quiet_to="03:30:00")
     await advance(hass, freezer, 12 * 3600 + 5)  # 01:00:05, held
     sent_at = None
     for _ in range(5 * 60):

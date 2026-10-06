@@ -1,14 +1,13 @@
 """Behaviour that must be the same in v1.0.7 and v1.0.8."""
-import logging
 from datetime import datetime, timedelta
 
 import pytest
 from homeassistant.const import STATE_UNAVAILABLE
-from homeassistant.core import HomeAssistant, State
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
-    MockConfigEntry, async_mock_service, mock_restore_cache,
+    MockConfigEntry, async_mock_service,
 )
 
 from .helpers import LAST_SEEN, OLD, advance, low_alerts, make_zigbee_device, setup_bs, stopped_alerts

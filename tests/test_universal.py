@@ -6,7 +6,7 @@ from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_mock_service
 
 from .helpers import OLD, advance, make_zigbee_device, setup_bs, stopped_alerts
-from .test_regression import CURTAIN, CURTAIN_R, fresh, make_curtains
+from .test_regression import CURTAIN, fresh, make_curtains
 
 NOT_SEEN = 12 * 3600
 
