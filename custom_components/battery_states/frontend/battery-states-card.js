@@ -117,7 +117,8 @@ window.customCards.push({
     return out;
   };
 
-  const NOT_RESPONDING_ICON = "mdi:battery-alert-variant-outline";
+  const NOT_RESPONDING_ICON = "mdi:battery-unknown";
+  const LOW_ICON = "mdi:battery-alert";
 
   class BatteryStatesCard extends LitElement {
     static get properties() {
@@ -577,13 +578,14 @@ window.customCards.push({
       const status = d.status || statusOf(d, low);
       const broken = status === "not_responding";
       const base = d.area_prefix && d.area ? `${d.area}: ${d.name}` : d.name;
-      // reading: a level is known (a device not responding shows its last one).
+      // reading: a level is known. A device that is not responding shows "N/A":
+      // its last level can't be trusted (a silent device can still say 100 %).
       const known = d.reading !== false;
-      const stateText = !known
-        ? "—"
-        : stateObj && this.hass.formatEntityState
-          ? this.hass.formatEntityState(stateObj, d.state)
-          : `${d.state} %`;
+      let stateText;
+      if (broken) stateText = "N/A";
+      else if (!known) stateText = "—";
+      else if (stateObj && this.hass.formatEntityState) stateText = this.hass.formatEntityState(stateObj, d.state);
+      else stateText = `${d.state} %`;
       const since = broken ? formatWhen(this.hass, d.not_responding_since) : "";
       const separator = next && !next.header;
       return html`
@@ -593,7 +595,14 @@ window.customCards.push({
         >
           ${broken
             ? html`<ha-state-icon class="row-icon" .hass=${this.hass} .icon=${NOT_RESPONDING_ICON}></ha-state-icon>`
-            : html`<ha-state-icon
+            : status === "low"
+              ? html`<ha-state-icon
+                  class="row-icon"
+                  style="color: ${iconColor(d.state)}"
+                  .hass=${this.hass}
+                  .icon=${LOW_ICON}
+                ></ha-state-icon>`
+              : html`<ha-state-icon
                 class="row-icon"
                 style="color: ${known ? iconColor(d.state) : "var(--disabled-text-color)"}"
                 .hass=${this.hass}

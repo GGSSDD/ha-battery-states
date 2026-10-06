@@ -142,11 +142,11 @@ load_minimized: true
 What's on it:
 
 - **Summary**: the low batteries per battery type and the total, plus a **Not responding** line while any device isn't.
-- **Not responding**: devices that aren't responding get their own section at the top, with their last known level and since when they've been silent. They're left out of the list below and the low counts until they respond again.
+- **Not responding**: devices that aren't responding get their own section at the top, with a battery-unknown icon, **N/A** instead of a level (the last one can't be trusted: a silent device can still say 100 %) and since when they've been silent. They're left out of the list below and the low counts until they respond again.
 - **Arrow**: sort by level, ascending or descending.
 - **Group by**: group by area or by battery type. The chip shows the current grouping; ✕ removes it.
 - **Filter** button: show only what needs attention, i.e. the low batteries and the devices not responding.
-- **Each battery**: the icon colour runs from green (full) to red (empty), with the name, battery type and level. A battery that hasn't reported a level yet shows **—**. Tap it to open its details.
+- **Each battery**: the icon colour runs from green (full) to red (empty), with the name, battery type and level. A low battery has a battery-alert icon and the `*TBR!` mark. A battery that hasn't reported a level yet shows **—**. Tap it to open its details.
 
 Sort, group and filter are remembered **per Home Assistant user**: the same on all your devices, and separate for each person in the household.
 
@@ -363,7 +363,7 @@ For such a device, set **Not responding after … hours** in its pop-up. You kno
 
 - When a whole network goes quiet at once (a coordinator or bridge down), nobody is listed. That's a network problem, not a device problem.
 - Home Assistant doesn't record which Bluetooth adapter or proxy a device is heard through. If one Bluetooth proxy dies, the devices that depended on it can be listed while others are fine. Their connection really is broken, which is why the message says "check its battery, the device and its connection".
-- A device that is not responding keeps its last known level on the card, but isn't counted as low. The moment it responds again, it's back in the list and the counts.
+- A device that is not responding shows **N/A** on the card instead of its last level, and isn't counted as low. The moment it responds again, it's back in the list and the counts.
 
 ## The sensors
 
