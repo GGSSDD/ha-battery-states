@@ -126,7 +126,18 @@ That's all it needs. The card finds the integration's sensor by itself.
 
 | Option | Default | Description |
 | --- | --- | --- |
+| `title` | `Battery States` | The card's title. |
+| `collapsible` | `false` | `true`: tap the title to minimize the card to its title and summary, and tap again to expand it. |
+| `load_minimized` | `false` | `true`: the card always opens minimized. It then also is collapsible (setting `collapsible: false` with it is a configuration error, since the card couldn't be expanded). |
 | `entity` | found automatically | The integration's low batteries sensor. Only needed if you want to point the card at a specific sensor. |
+
+**Example:** a card titled "Batteries" that opens minimized and expands with a tap on its title:
+
+```yaml
+type: custom:battery-states-card
+title: Batteries
+load_minimized: true
+```
 
 What's on it:
 
@@ -179,7 +190,7 @@ uix:
 | Selector | What it is |
 | --- | --- |
 | `ha-card.main` | The whole card |
-| `.title` | The "Battery States" title |
+| `.title` | The title (`.title.toggle` when it can be tapped, `.title.minimized` while minimized) |
 | `ha-card.summary` | The summary box (type / count table) |
 | `.controls` | The row with sort, Group by, chip and filter |
 | `.sort-icon`, `.filter-icon`, `.filter-icon.on` | The sort arrow and the filter icon (`.on` while filtering) |

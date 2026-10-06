@@ -126,6 +126,7 @@ window.customCards.push({
         _config: { state: true },
         _menuOpen: { state: true },
         _prefs: { state: true },
+        _minimized: { state: true },
       };
     }
 
@@ -144,8 +145,40 @@ window.customCards.push({
       };
     }
 
+    // Card options (all optional):
+    //   title           the card's title (default "Battery States")
+    //   load_minimized  true: the card opens minimized (title and summary only)
+    //   collapsible     true: tapping the title minimizes / expands the card
+    // A card that opens minimized must be able to expand: load_minimized: true
+    // implies collapsible: true, and collapsible: false with it is an error.
     setConfig(config) {
+      const fail = (message) => {
+        throw new Error(message);
+      };
+      if (config.title !== undefined && typeof config.title !== "string") fail("title must be text");
+      for (const key of ["load_minimized", "collapsible"]) {
+        if (config[key] !== undefined && typeof config[key] !== "boolean") fail(`${key} must be true or false`);
+      }
+      if (config.load_minimized === true && config.collapsible === false) {
+        fail("load_minimized: true needs collapsible: true (or leave collapsible out): a minimized card must be able to expand");
+      }
       this._config = { ...config };
+      this._collapsible = config.collapsible === true || config.load_minimized === true;
+      this._minimized = config.load_minimized === true;
+      this._menuOpen = false;
+    }
+
+    _toggleMinimized() {
+      if (!this._collapsible) return;
+      this._menuOpen = false;
+      this._minimized = !this._minimized;
+    }
+
+    _titleKey(ev) {
+      if (ev.key === "Enter" || ev.key === " ") {
+        ev.preventDefault();
+        this._toggleMinimized();
+      }
     }
 
     static getStubConfig() {
@@ -154,6 +187,7 @@ window.customCards.push({
 
     getCardSize() {
       const st = this.hass && this._config ? this.hass.states[this._entityId()] : undefined;
+      if (this._minimized) return 3;
       return 4 + (st?.attributes?.devices?.length ?? 0);
     }
 
@@ -238,7 +272,7 @@ window.customCards.push({
     }
 
     shouldUpdate(changed) {
-      if (changed.has("_config") || changed.has("_menuOpen") || changed.has("_prefs")) return true;
+      if (changed.has("_config") || changed.has("_menuOpen") || changed.has("_prefs") || changed.has("_minimized")) return true;
       if (!changed.has("hass")) return true;
       const old = changed.get("hass");
       if (!old || !this.hass) return true;
@@ -390,13 +424,32 @@ window.customCards.push({
       return html`
         <ha-card class="main">
           <div class="stack">
-            <div class="title"><div class="title-name">Battery States</div></div>
-            ${this._renderSummary(counts, broken)}
-            ${this._renderControls(sortOrder, groupBy, filterOn)}
-            <div class="list">${list.map((d, i) => this._renderItem(d, list[i + 1], low))}</div>
+            ${this._renderTitle()} ${this._renderSummary(counts, broken)}
+            ${this._minimized
+              ? ""
+              : html`${this._renderControls(sortOrder, groupBy, filterOn)}
+                  <div class="list">${list.map((d, i) => this._renderItem(d, list[i + 1], low))}</div>`}
           </div>
         </ha-card>
       `;
+    }
+
+    _renderTitle() {
+      const text = this._config.title ?? "Battery States";
+      if (!this._collapsible) {
+        return html`<div class="title"><div class="title-name">${text}</div></div>`;
+      }
+      // Tapping the title (or Enter / Space on it) minimizes or expands the card.
+      return html`<div
+        class="title toggle ${this._minimized ? "minimized" : ""}"
+        role="button"
+        tabindex="0"
+        aria-expanded=${this._minimized ? "false" : "true"}
+        @click=${() => this._toggleMinimized()}
+        @keydown=${(ev) => this._titleKey(ev)}
+      >
+        <div class="title-name">${text}</div>
+      </div>`;
     }
 
     _renderSummary(counts, broken) {
@@ -574,7 +627,7 @@ window.customCards.push({
         }
         /* Background comes from the theme (ha-card's own default); change it,
            or anything else, with uix in the card config. Stable hooks:
-           ha-card.main, .title, ha-card.summary, tr.total, tr.not-responding,
+           ha-card.main, .title, .title.toggle, .title.minimized, ha-card.summary, tr.total, tr.not-responding,
            .controls, .select-anchor, .menu, .menu-item, ha-card.chip, .list,
            ha-card.header, ha-card.header.not-responding, ha-card.row,
            ha-card.row.not-responding, .row-icon, .text, .name, .tbr, .label,
@@ -613,6 +666,16 @@ window.customCards.push({
           font-weight: 400;
           line-height: normal;
           letter-spacing: normal;
+        }
+        .title.toggle {
+          cursor: pointer;
+          user-select: none;
+          -webkit-user-select: none;
+          -webkit-tap-highlight-color: transparent;
+          outline: none;
+        }
+        .title.toggle:focus-visible .title-name {
+          text-decoration: underline;
         }
         .title-name {
           text-overflow: ellipsis;
