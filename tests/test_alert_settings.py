@@ -39,6 +39,7 @@ QUIET = {"quiet_hours": True, "quiet_from": "22:00:00", "quiet_to": "07:00:00"}
 
 # ------------------------------------------------------------- limits
 async def test_low_limit_setting(hass: HomeAssistant, freezer) -> None:
+    freezer.move_to(at(6, 12, 0))  # a fixed day: the 20:00 check below must lie ahead
     make_zigbee_device(hass)
     calls = async_mock_service(hass, "notify", "test")
     fresh(hass, "35")
