@@ -2,7 +2,7 @@
 
 [![Validate](https://github.com/GGSSDD/ha-battery-states/actions/workflows/validate.yml/badge.svg)](https://github.com/GGSSDD/ha-battery-states/actions/workflows/validate.yml)
 [![GitHub release](https://img.shields.io/github/v/release/GGSSDD/ha-battery-states)](https://github.com/GGSSDD/ha-battery-states/releases)
-[![HACS](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://hacs.xyz/)
+[![HACS](https://img.shields.io/badge/HACS-Default-41BDF5.svg)](https://hacs.xyz/)
 [![Buy me a coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-GGSSDD-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/GGSSDD)
 
 A Home Assistant integration that keeps an eye on all your batteries in one place.
@@ -41,17 +41,15 @@ A Home Assistant integration that keeps an eye on all your batteries in one plac
 
 ## Installation
 
-### HACS (recommended)
+### HACS or Marketplace (recommended)
 
-Until Battery States is in the HACS default store, add it as a custom repository. With [My Home Assistant](https://my.home-assistant.io/) set up, this button does it for you:
+1. Open **HACS**. From Home Assistant 2026.11 it is **Settings → Marketplace**.
+2. Search for **Battery States** and **Download** it (in the Marketplace: **Install**).
+3. Restart Home Assistant.
+
+Or open it there in one step with [My Home Assistant](https://my.home-assistant.io/):
 
 [![Open your Home Assistant instance and open this repository in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=GGSSDD&repository=ha-battery-states&category=integration)
-
-Or by hand:
-
-1. HACS → menu (⋮) → **Custom repositories**.
-2. Repository: `https://github.com/GGSSDD/ha-battery-states`, type **Integration** → **Add**.
-3. Find **Battery States** in HACS, **Download**, then restart Home Assistant.
 
 ### Manual
 
@@ -445,7 +443,7 @@ The card, the settings page and the alert texts are in English.
 
 1. **Settings → Devices & services → Battery States → Delete.** This also removes the integration's saved data.
 2. Remove the card from your dashboards.
-3. Remove the integration in HACS (or delete `custom_components/battery_states`) and restart Home Assistant.
+3. Remove it in HACS or the Marketplace (or delete `custom_components/battery_states`) and restart Home Assistant.
 
 ## Support
 
