@@ -303,7 +303,7 @@ class BatteryMonitor:
         self.log: list[dict[str, Any]] = []
         self._held: list[dict[str, Any]] = []
         self._deliveries: set[asyncio.Task[None]] = set()
-        self.library = BatteryLibrary(hass, self._library_updated)
+        self.library = BatteryLibrary(hass)
         # "Not responding" detection: Home Assistant downtime and each network's state.
         self._downtime: list[tuple[datetime, datetime]] = []
         self._groups: dict[str, dict[str, Any]] = {}
@@ -324,7 +324,6 @@ class BatteryMonitor:
             self._load_log(stored.get("log"), stored.get("held"))
             self._load_health(stored)
         await self.library.async_load()
-        self.library.async_start_updates()
         self._resolve_devices()
         self._track()
         self._evaluate_all()
@@ -360,7 +359,6 @@ class BatteryMonitor:
     async def async_stop(self) -> None:
         """Stop tracking and save (a reload must find the latest data)."""
         self._stopped = True
-        self.library.async_stop()
         for unsub in self._unsubs + self._schedule_unsubs:
             unsub()
         self._unsubs.clear()
@@ -589,11 +587,6 @@ class BatteryMonitor:
             self._evaluate_all()  # the limits decide low / not seen
             self._flush_held()  # quiet hours may be off or over now
         async_dispatcher_send(self.hass, SIGNAL_UPDATE)
-
-    @callback
-    def _library_updated(self) -> None:
-        """A newer battery library arrived: types may have changed."""
-        self._delayed_resolve(None)
 
     @callback
     def _delayed_resolve(self, now: datetime | None) -> None:

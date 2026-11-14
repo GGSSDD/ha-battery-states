@@ -16,7 +16,6 @@ from homeassistant.helpers.typing import ConfigType
 
 from . import websocket
 from .const import CARD_URL, DOMAIN, PANEL_URL, PANEL_URL_PATH, VERSION
-from .library import LIBRARY_STORE_KEY
 from .monitor import STORAGE_VERSION, BatteryMonitor
 
 PLATFORMS = [Platform.SENSOR]
@@ -73,11 +72,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: BatteryStatesConfigEntr
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: BatteryStatesConfigEntry) -> None:
-    """The integration was deleted: remove its saved readings and library copy."""
+    """The integration was deleted: remove its saved readings."""
     await Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}").async_remove()
-    # HA still lists the entry being removed at this point, so look for others.
-    if not [e for e in hass.config_entries.async_entries(DOMAIN) if e.entry_id != entry.entry_id]:
-        await Store(hass, 1, LIBRARY_STORE_KEY).async_remove()
 
 
 async def _async_options_updated(hass: HomeAssistant, entry: BatteryStatesConfigEntry) -> None:

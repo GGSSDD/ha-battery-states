@@ -3,37 +3,28 @@
 The device matching below follows Battery Notes' own rules
 (custom_components/battery_notes/library.py, get_device_battery_details) so a
 device gets the same battery type it would get there. A copy of the library
-ships with this integration; a newer one is downloaded once a week and kept.
+ships with this integration and is refreshed with each release. Battery Notes
+asks other projects not to download the library from its repository, so this
+integration never downloads it.
 """
 
 from __future__ import annotations
 
-import asyncio
-from collections.abc import Callable
-from datetime import timedelta
 import json
 import logging
 from pathlib import Path
 from typing import Any
 
-import aiohttp
-
-from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.event import async_call_later, async_track_time_interval
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-LIBRARY_URL = (
-    "https://raw.githubusercontent.com/andrew-codechimp/HA-Battery-Notes/main/library/library.json"
-)
-REFRESH_INTERVAL = timedelta(days=7)
-FIRST_DOWNLOAD_DELAY = 60  # seconds after setup, so startup isn't slowed
 BUNDLED = Path(__file__).parent / "library" / "library.json"
-LIBRARY_STORE_KEY = f"{DOMAIN}.library"
+# Versions up to 1.2.6 kept a downloaded copy here; it is removed on load.
+OLD_DOWNLOAD_STORE_KEY = f"{DOMAIN}.library"
 
 
 def _cf(value: Any) -> str:
@@ -54,21 +45,14 @@ def _valid(data: Any) -> bool:
 class BatteryLibrary:
     """Looks up a device's battery type by manufacturer / model / model_id / hw_version."""
 
-    def __init__(self, hass: HomeAssistant, on_update: Callable[[], None]) -> None:
+    def __init__(self, hass: HomeAssistant) -> None:
         """Initialize."""
         self.hass = hass
-        self._on_update = on_update
-        self._store: Store[dict[str, Any]] = Store(hass, 1, LIBRARY_STORE_KEY)
         self._by_manufacturer: dict[str, list[dict[str, Any]]] = {}
-        self._unsubs: list[CALLBACK_TYPE] = []
-        self._task: asyncio.Task[None] | None = None
 
     async def async_load(self) -> None:
-        """Use the downloaded copy if there is one, else the bundled copy."""
-        cached = await self._store.async_load()
-        if _valid(cached):
-            self._index(cached)
-            return
+        """Use the copy that ships with the integration."""
+        await Store(self.hass, 1, OLD_DOWNLOAD_STORE_KEY).async_remove()
         data = await self.hass.async_add_executor_job(
             lambda: json.loads(BUNDLED.read_text(encoding="utf-8"))
         )
@@ -76,54 +60,6 @@ class BatteryLibrary:
             self._index(data)
         else:
             _LOGGER.error("The bundled battery library is not valid")
-
-    @callback
-    def async_start_updates(self) -> None:
-        """Download a newer library shortly after start and then weekly."""
-        self._unsubs.append(
-            async_call_later(self.hass, FIRST_DOWNLOAD_DELAY, self._scheduled_download)
-        )
-        self._unsubs.append(
-            async_track_time_interval(self.hass, self._scheduled_download, REFRESH_INTERVAL)
-        )
-
-    @callback
-    def async_stop(self) -> None:
-        """Stop the updates (also a download in progress)."""
-        for unsub in self._unsubs:
-            unsub()
-        self._unsubs.clear()
-        if self._task is not None and not self._task.done():
-            self._task.cancel()
-        self._task = None
-
-    @callback
-    def _scheduled_download(self, _now: Any) -> None:
-        if self._task is not None and not self._task.done():
-            return  # still downloading
-        self._task = self.hass.async_create_background_task(
-            self._async_download(), f"{DOMAIN} library"
-        )
-
-    async def _async_download(self) -> None:
-        session = async_get_clientsession(self.hass)
-        try:
-            async with asyncio.timeout(60):
-                resp = await session.get(LIBRARY_URL)
-                resp.raise_for_status()
-                data = json.loads(await resp.text())
-        except (TimeoutError, aiohttp.ClientError, ValueError) as err:
-            _LOGGER.debug("Battery library download failed, keeping the current copy: %s", err)
-            return
-        except Exception:  # noqa: BLE001 - a background refresh must never fail loudly
-            _LOGGER.debug("Battery library download failed, keeping the current copy", exc_info=True)
-            return
-        if not _valid(data):
-            _LOGGER.warning("Downloaded battery library is not valid, keeping the current copy")
-            return
-        await self._store.async_save(data)
-        self._index(data)
-        self._on_update()
 
     def _index(self, data: dict[str, Any]) -> None:
         index: dict[str, list[dict[str, Any]]] = {}

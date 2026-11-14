@@ -1,7 +1,6 @@
 """Test setup: the integration under test is this repo's custom_components/battery_states."""
 import pathlib
 import sys
-from unittest.mock import patch
 
 import pytest
 
@@ -17,12 +16,3 @@ custom_components.__path__ = [str(_root / "custom_components"), *custom_componen
 def auto_enable_custom_integrations(enable_custom_integrations):
     yield
 
-
-@pytest.fixture(autouse=True)
-def no_library_download():
-    """The tests never download the battery library."""
-    async def _noop(self):
-        return None
-    from custom_components.battery_states import library
-    with patch.object(library.BatteryLibrary, "_async_download", _noop):
-        yield

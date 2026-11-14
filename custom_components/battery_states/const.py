@@ -1,7 +1,7 @@
 """Constants for the Battery States integration."""
 
 DOMAIN = "battery_states"
-VERSION = "1.2.6"
+VERSION = "1.2.7"
 
 NOTIFY_TITLE = "Batteries"
 LOG_SIZE = 50  # recent alerts kept for the settings page

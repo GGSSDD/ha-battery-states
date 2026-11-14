@@ -1,5 +1,4 @@
 """The fixes of v1.0.8 (each one fails on v1.0.7)."""
-import asyncio
 import json
 from datetime import timedelta
 from unittest.mock import patch
@@ -14,9 +13,6 @@ from custom_components.battery_states import library as lib
 from .helpers import (
     LAST_SEEN, NEW, OLD, advance, low_alerts, make_zigbee_device, setup_bs, stopped_alerts,
 )
-
-ORIG_DOWNLOAD = lib.BatteryLibrary._async_download  # patched to a no-op by conftest after import
-
 
 def fresh(hass, value="50", hours_ago=0):
     hass.states.async_set(OLD, value)
@@ -101,59 +97,25 @@ async def test_no_resolve_after_unload(hass: HomeAssistant, freezer) -> None:
     assert mon._track_unsub is None and calls == []
 
 
-class _SlowLibraryServer:
-    def __init__(self, data):
-        self.gate = asyncio.Event()
-        self.data = data
-
-    def session(self, _hass):
-        server = self
-
-        class Resp:
-            def raise_for_status(self): ...
-            async def text(self):
-                await server.gate.wait()
-                return json.dumps(server.data)
-
-        class Session:
-            async def get(self, url):
-                return Resp()
-
-        return Session()
-
-
-async def test_library_download_cancelled_on_unload(hass: HomeAssistant, freezer) -> None:
+async def test_library_never_downloaded(hass: HomeAssistant, freezer, hass_storage) -> None:
+    """1.2.7: the bundled library is used; nothing is downloaded and the old downloaded copy goes."""
+    hass_storage[lib.OLD_DOWNLOAD_STORE_KEY] = {
+        "version": 1, "key": lib.OLD_DOWNLOAD_STORE_KEY,
+        "data": {"devices": [{"manufacturer": "SONOFF", "model": "SNZB-04", "battery_type": "CR9999"}]},
+    }
     make_zigbee_device(hass)
     async_mock_service(hass, "notify", "test")
     fresh(hass)
-    entry = await setup_bs(hass)
-    mon = entry.runtime_data
-    server = _SlowLibraryServer({"devices": [{"manufacturer": "SONOFF", "model": "SNZB-04", "battery_type": "CR9999"}]})
-    with patch.object(lib, "async_get_clientsession", server.session), \
-         patch.object(lib.BatteryLibrary, "_async_download", ORIG_DOWNLOAD):
-        mon.library._scheduled_download(None)
-        await asyncio.sleep(0)
-        assert await hass.config_entries.async_unload(entry.entry_id)
-        server.gate.set()
+    with patch("aiohttp.ClientSession._request", side_effect=AssertionError("download")) as request:
+        entry = await setup_bs(hass)
+        await advance(hass, freezer, 120)
+        await advance(hass, freezer, 8 * 86400)
         await hass.async_block_till_done(wait_background_tasks=True)
-    assert mon._track_unsub is None
-    assert mon.devices[0].battery_type != "CR9999"
-
-
-async def test_library_download_still_updates_types(hass: HomeAssistant, freezer) -> None:
-    """Regression: while loaded, a downloaded library still changes the types."""
-    make_zigbee_device(hass)
-    async_mock_service(hass, "notify", "test")
-    fresh(hass)
-    entry = await setup_bs(hass)
-    mon = entry.runtime_data
-    server = _SlowLibraryServer({"devices": [{"manufacturer": "SONOFF", "model": "SNZB-04", "battery_type": "CR9999"}]})
-    server.gate.set()
-    with patch.object(lib, "async_get_clientsession", server.session), \
-         patch.object(lib.BatteryLibrary, "_async_download", ORIG_DOWNLOAD):
-        mon.library._scheduled_download(None)
-        await hass.async_block_till_done(wait_background_tasks=True)
-    assert mon.devices[0].battery_type == "CR9999"
+    assert request.call_count == 0
+    assert lib.OLD_DOWNLOAD_STORE_KEY not in hass_storage
+    bundled = json.loads(lib.BUNDLED.read_text(encoding="utf-8"))
+    sonoff = [d for d in bundled["devices"] if d["manufacturer"] == "SONOFF" and d["model"] == "SNZB-04"]
+    assert sonoff and entry.runtime_data.devices[0].battery_type == sonoff[0]["battery_type"]
 
 
 # ---------------------------------------------------------- one 20 % rule

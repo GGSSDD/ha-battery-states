@@ -423,7 +423,7 @@ card:
 
 ## Battery types
 
-Each device's battery type is looked up in the [Battery Notes](https://github.com/andrew-codechimp/HA-Battery-Notes) community library by its manufacturer and model. A copy of the library is included, and a newer one is downloaded once a week from GitHub (`raw.githubusercontent.com`). If that fails, the copy you have keeps working. Devices the library doesn't know show as *Unknown*. Set their type on the settings page, and consider adding them to the Battery Notes library so everyone benefits.
+Each device's battery type is looked up in the [Battery Notes](https://github.com/andrew-codechimp/HA-Battery-Notes) community library by its manufacturer and model. A copy of the library is included and refreshed with each release; the integration never downloads it. Devices the library doesn't know show as *Unknown*. Set their type on the settings page, and consider adding them to the Battery Notes library so everyone benefits.
 
 ## Troubleshooting
 
